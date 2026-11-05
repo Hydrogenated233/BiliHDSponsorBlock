@@ -1,0 +1,2 @@
+# Preserve upstream SVG bytes, including their original line endings.
+assets/chrome-icons/*.svg -text

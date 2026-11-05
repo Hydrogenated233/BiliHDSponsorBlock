@@ -1,0 +1,13 @@
+HD 空降助手 uses Material Components for Android and AndroidX libraries,
+distributed under Apache License 2.0. The complete license text is in
+Apache-2.0.txt. Material Components copyright The Android Open Source Project;
+AndroidX copyright The Android Open Source Project.
+
+https://github.com/material-components/material-components-android
+https://android.googlesource.com/platform/frameworks/support/
+
+The legacy Xposed API 82 is a compile-only build dependency fetched from
+https://api.xposed.info/ and is not included in this APK.
+
+GPL-3.0.txt contains the project license. Corresponding sources and attribution
+are supplied with the source release.
