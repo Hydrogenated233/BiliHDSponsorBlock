@@ -76,6 +76,7 @@
 !/docs/chrome-parity-current-status.md
 !/docs/playback-policy-verification.md
 !/docs/navigation-cache-channel-verification.md
+!/docs/cover-mode-verification.md
 
 # tools/xposed-api.jar is fetched and checksum-verified locally; never distributed.
 !/src/top/local/bilihdskip/PlaybackPolicy.java
@@ -109,6 +110,9 @@
 !/tests-junit/ChannelConfigTest.java
 !/src/top/local/bilihdskip/NativeCards.java
 !/src/top/local/bilihdskip/FullVideoLabels.java
+!/src/top/local/bilihdskip/CardCover.java
+!/src/top/local/bilihdskip/CardBlur.java
+!/tests-junit/CardBlurTest.java
 !/src/top/local/bilihdskip/LabelBlocks.java
 !/src/top/local/bilihdskip/LabelRequests.java
 !/src/top/local/bilihdskip/VideoLabelCache.java

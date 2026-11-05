@@ -35,7 +35,8 @@ public final class FullVideoLabels {
         }
 
         public boolean requestsLabels() {
-            if (!enabled || !fullVideoSegments || thumbnailMode != OVERLAY) return false;
+            if (!enabled || !fullVideoSegments || !supportedMode(thumbnailMode)
+                    || thumbnailMode == DISABLED) return false;
             for (Integer option : selections.values()) if (enabledOption(option)) return true;
             return false;
         }
@@ -45,9 +46,9 @@ public final class FullVideoLabels {
         }
     }
 
-    /** Native scope intentionally supports only 0/1; never remap the destructive modes. */
+    /** The fixed Chrome modes are 0..5; unknown values never enable label processing. */
     public static boolean supportedMode(int mode) {
-        return mode == DISABLED || mode == OVERLAY;
+        return mode >= DISABLED && mode <= SOLID_COVER;
     }
 
     public static boolean fullCategory(String category) {

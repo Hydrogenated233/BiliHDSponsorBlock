@@ -36,10 +36,11 @@ public final class FullVideoLabelsTest {
             eq(null, FullVideoLabels.select(settings(true, true, 1, categories), new String[] {other, "sponsor"}));
         }
         for (int mode = -1; mode <= 6; mode++) {
-            eq(mode == 0 || mode == 1, FullVideoLabels.supportedMode(mode));
+            eq(mode >= 0 && mode <= 5, FullVideoLabels.supportedMode(mode));
             FullVideoLabels.Settings value = settings(true, true, mode, categories);
-            eq(mode == 1, value.requestsLabels());
-            eq(mode == 1 ? "sponsor" : null, FullVideoLabels.select(value, new String[] {"sponsor"}));
+            eq(mode >= 1 && mode <= 5, value.requestsLabels());
+            eq(mode >= 1 && mode <= 5 ? "sponsor" : null,
+                    FullVideoLabels.select(value, new String[] {"sponsor"}));
         }
         eq(null, FullVideoLabels.select(null, new String[] {"sponsor"}));
         eq(null, FullVideoLabels.select(defaults, null));
@@ -86,6 +87,76 @@ public final class FullVideoLabelsTest {
         eq(false, FullVideoLabels.current(1, 1, 3, 3, model, model, 0, 0));
         System.out.println("FullVideoLabelsTest: " + checks + " checks passed");
     }
+
+    @org.junit.Test public void activeModesPreserveCategoryAndFirstSegmentPolicy() {
+        for (int mode = 1; mode <= 5; mode++) {
+            Map<String, Integer> categories = new HashMap<String, Integer>();
+            categories.put("sponsor", 2);
+            categories.put("selfpromo", 1);
+            categories.put("exclusive_access", 0);
+            FullVideoLabels.Settings value = settings(true, true, mode, categories);
+            org.junit.Assert.assertEquals(mode, value.thumbnailMode);
+            org.junit.Assert.assertTrue(value.requestsLabels());
+            for (String category : new String[] {"sponsor", "selfpromo", "exclusive_access"}) {
+                org.junit.Assert.assertEquals(category,
+                        FullVideoLabels.select(value, new String[] {category, "sponsor"}));
+                org.junit.Assert.assertEquals(category, FullVideoLabels.selectFirst(value, category));
+            }
+            org.junit.Assert.assertNull(FullVideoLabels.select(value, new String[] {null, "sponsor"}));
+            org.junit.Assert.assertNull(FullVideoLabels.select(value, new String[] {"intro", "sponsor"}));
+            org.junit.Assert.assertNull(FullVideoLabels.select(value, null));
+            org.junit.Assert.assertNull(FullVideoLabels.select(value, new String[0]));
+            org.junit.Assert.assertFalse(settings(false, true, mode, categories).requestsLabels());
+            org.junit.Assert.assertFalse(settings(true, false, mode, categories).requestsLabels());
+            org.junit.Assert.assertNull(FullVideoLabels.selectFirst(settings(false, true, mode, categories), "sponsor"));
+            org.junit.Assert.assertNull(FullVideoLabels.selectFirst(settings(true, false, mode, categories), "sponsor"));
+
+            categories.put("sponsor", -1);
+            FullVideoLabels.Settings disabledFirst = settings(true, true, mode, categories);
+            org.junit.Assert.assertTrue(disabledFirst.requestsLabels());
+            org.junit.Assert.assertNull(FullVideoLabels.select(disabledFirst, new String[] {"sponsor", "selfpromo"}));
+            categories.remove("sponsor");
+            org.junit.Assert.assertNull(FullVideoLabels.select(settings(true, true, mode, categories),
+                    new String[] {"sponsor", "selfpromo"}));
+            org.junit.Assert.assertEquals("sponsor", FullVideoLabels.selectFirst(value, "sponsor"));
+        }
+    }
+
+    @org.junit.Test public void inactiveAndMalformedModesDoNotRequestOrSelectLabels() {
+        Map<String, Integer> categories = new HashMap<String, Integer>();
+        categories.put("sponsor", 2);
+        for (int mode : new int[] {Integer.MIN_VALUE, -17, -2, -1, 0, 6, 17, Integer.MAX_VALUE}) {
+            FullVideoLabels.Settings value = settings(true, true, mode, categories);
+            org.junit.Assert.assertEquals(mode, value.thumbnailMode);
+            org.junit.Assert.assertEquals(mode == 0, FullVideoLabels.supportedMode(mode));
+            org.junit.Assert.assertFalse(value.requestsLabels());
+            org.junit.Assert.assertNull(FullVideoLabels.select(value, new String[] {"sponsor"}));
+            org.junit.Assert.assertNull(FullVideoLabels.selectFirst(value, "sponsor"));
+        }
+    }
+
+    @org.junit.Test public void activeModesRequireARealEnabledCategory() {
+        for (int mode = 1; mode <= 5; mode++) {
+            org.junit.Assert.assertFalse(settings(true, true, mode, null).requestsLabels());
+            org.junit.Assert.assertFalse(settings(true, true, mode,
+                    new HashMap<String, Integer>()).requestsLabels());
+            Map<String, Integer> categories = new HashMap<String, Integer>();
+            categories.put("intro", 2);
+            org.junit.Assert.assertFalse(settings(true, true, mode, categories).requestsLabels());
+            for (String category : new String[] {"sponsor", "selfpromo", "exclusive_access"}) {
+                for (Integer option : new Integer[] {null, Integer.MIN_VALUE, -2, -1, 0, 1, 2, 3, Integer.MAX_VALUE}) {
+                    categories.put(category, option);
+                    FullVideoLabels.Settings value = settings(true, true, mode, categories);
+                    boolean enabled = option != null && option >= 0 && option <= 2;
+                    org.junit.Assert.assertEquals(enabled, value.requestsLabels());
+                    org.junit.Assert.assertEquals(enabled ? category : null,
+                            FullVideoLabels.selectFirst(value, category));
+                    categories.remove(category);
+                }
+            }
+        }
+    }
+
     private static long aid(String goTo, int type, long args, long player, boolean ad,
                             long argsRoom, int live, long playerRoom, long episode, long season) {
         return FullVideoLabels.videoAid(goTo, type, args, player, ad, argsRoom, live, playerRoom, episode, season);

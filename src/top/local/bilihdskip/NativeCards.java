@@ -1,17 +1,26 @@
 package top.local.bilihdskip;
 
 import android.graphics.Color;
+import android.graphics.Rect;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.MotionEvent;
+import android.view.InputDevice;
+import android.view.ViewTreeObserver;
 import android.widget.TextView;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedHelpers;
+import de.robv.android.xposed.XposedBridge;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.WeakHashMap;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Exact HD 2.2.0 holders. Parent owns transport, admission, deduplication and cache. */
@@ -33,11 +42,14 @@ public final class NativeCards {
     private final Diagnostics diagnostics;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final List<Binding> bindings = new ArrayList<Binding>();
+    private final Map<View, Binding> roots = new WeakHashMap<View, Binding>();
+    private final Set<Method> eventMethods = new HashSet<Method>();
+    private final List<XC_MethodHook.Unhook> eventHooks = new ArrayList<XC_MethodHook.Unhook>();
     private FullVideoLabels.Settings settings;
     private Class<?> playerClass;
     private Method overlayGetter, overlayAdd, overlayRemove;
     private HolderAccess legacy, modern;
-    private long generation, sequence, binds, supported, rendered, errors, lastAid;
+    private long generation, sequence, binds, supported, rendered, errors, lastAid, blockedTouches, hoverReveals;
 
     public NativeCards(Source source, Diagnostics diagnostics, FullVideoLabels.Settings settings) {
         if (source == null || settings == null) throw new IllegalArgumentException();
@@ -99,6 +111,8 @@ public final class NativeCards {
         bindings.clear();
         if (legacy != null) { legacy.hook.unhook(); legacy = null; }
         if (modern != null) { modern.hook.unhook(); modern = null; }
+        for (XC_MethodHook.Unhook hook : eventHooks) hook.unhook();
+        eventHooks.clear(); eventMethods.clear(); roots.clear();
         report();
     }
 
@@ -255,9 +269,15 @@ public final class NativeCards {
         ViewGroup root = binding.root.get();
         View cover = binding.cover.get();
         if (root == null || cover == null) return;
+        roots.put(root, binding);
+        if (settings.thumbnailMode >= FullVideoLabels.BLUR_REVEAL_ON_HOVER) {
+            try { installEvents(root); }
+            catch (Throwable ignored) { errors++; dispose(binding); report(); return; }
+        }
         root.addOnLayoutChangeListener(binding);
         cover.addOnLayoutChangeListener(binding);
         root.addOnAttachStateChangeListener(binding);
+        binding.listen();
         position(binding);
     }
 
@@ -266,6 +286,11 @@ public final class NativeCards {
         View cover = binding.cover.get();
         if (root == null || cover == null) return;
         if (!valid(binding) || !descendant(cover, root)) { dispose(binding); return; }
+        if (settings.thumbnailMode == FullVideoLabels.HIDE && root.getWindowToken() != null) {
+            if (binding.hiddenVisibility < 0) binding.hiddenVisibility = root.getVisibility();
+            if (root.getVisibility() != View.GONE) { root.setVisibility(View.GONE); report(); }
+            return;
+        }
         if (root.getWindowToken() == null || !cover.isShown()) { removeLabel(binding); return; }
         try {
             int gap = Math.max(1, (int) (4 * root.getResources().getDisplayMetrics().density));
@@ -297,6 +322,15 @@ public final class NativeCards {
             if (x < 0 || y < 0 || x + label.getMeasuredWidth() > root.getWidth()
                     || y + label.getMeasuredHeight() > root.getHeight()) { removeLabel(binding); return; }
             label.layout(x, y, x + label.getMeasuredWidth(), y + label.getMeasuredHeight());
+            if (settings.thumbnailMode >= FullVideoLabels.BLUR_REVEAL_ON_HOVER) {
+                CardCover effect = binding.effect.get();
+                if (effect == null) {
+                    effect = new CardCover(root, label, settings.thumbnailMode);
+                    binding.effect = new WeakReference<CardCover>(effect);
+                    overlayAdd.invoke(overlayGetter.invoke(root), effect);
+                }
+                effect.resize(root.getWidth(), root.getHeight());
+            }
             if (fresh) {
                 overlayAdd.invoke(overlayGetter.invoke(root), label);
                 binding.label = new WeakReference<TextView>(label);
@@ -309,18 +343,31 @@ public final class NativeCards {
     private void removeLabel(Binding binding) {
         TextView label = binding.label.get();
         ViewGroup root = binding.root.get();
+        CardCover effect = binding.effect.get();
+        if (effect != null) {
+            effect.close();
+            try { if (root != null) overlayRemove.invoke(overlayGetter.invoke(root), effect); }
+            catch (Throwable ignored) { errors++; }
+            binding.effect.clear();
+        }
         try {
             if (root != null && label != null) overlayRemove.invoke(overlayGetter.invoke(root), label);
         } catch (Throwable ignored) { errors++; }
         binding.label.clear();
+        if (root != null && binding.hiddenVisibility >= 0 && root.getVisibility() == View.GONE)
+            root.setVisibility(binding.hiddenVisibility == View.INVISIBLE ? View.INVISIBLE
+                    : binding.hiddenVisibility == View.GONE ? View.GONE : View.VISIBLE);
+        binding.hiddenVisibility = -1;
     }
 
     private void dispose(Binding binding) {
         binding.active = false;
+        binding.unlisten();
         removeLabel(binding);
         ViewGroup root = binding.root.get();
         View cover = binding.cover.get();
         if (root != null) {
+            if (roots.get(root) == binding) roots.remove(root);
             root.removeOnLayoutChangeListener(binding);
             root.removeOnAttachStateChangeListener(binding);
         }
@@ -333,6 +380,37 @@ public final class NativeCards {
             view = view.getParent() instanceof View ? (View) view.getParent() : null;
         }
         return false;
+    }
+    private void installEvents(ViewGroup root) {
+        for (final String name : new String[] {"dispatchTouchEvent", "dispatchHoverEvent"}) {
+            Method method = XposedHelpers.findMethodBestMatch(root.getClass(), name, MotionEvent.class);
+            if (!eventMethods.add(method)) continue;
+            eventHooks.add(XposedBridge.hookMethod(method, new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    Binding binding = roots.get(param.thisObject);
+                    if (binding == null || !binding.active || !valid(binding) || binding.effect.get() == null) return;
+                    if (name.equals("dispatchTouchEvent") && (settings.thumbnailMode == FullVideoLabels.BLUR_ALWAYS
+                            || settings.thumbnailMode == FullVideoLabels.SOLID_COVER)) {
+                        if (((MotionEvent)param.args[0]).getActionMasked() == MotionEvent.ACTION_DOWN) {
+                            blockedTouches++; report();
+                        }
+                        param.setResult(true);
+                    }
+                }
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    Binding binding = roots.get(param.thisObject);
+                    if (!name.equals("dispatchHoverEvent") || binding == null || !binding.active
+                            || binding.effect.get() == null || settings.thumbnailMode != FullVideoLabels.BLUR_REVEAL_ON_HOVER) return;
+                    MotionEvent event = (MotionEvent) param.args[0];
+                    if (!event.isFromSource(InputDevice.SOURCE_MOUSE) && !event.isFromSource(InputDevice.SOURCE_STYLUS)) return;
+                    CardCover effect = binding.effect.get();
+                    if (effect != null) {
+                        effect.reveal(event.getActionMasked() != MotionEvent.ACTION_HOVER_EXIT);
+                        if (event.getActionMasked() == MotionEvent.ACTION_HOVER_ENTER) { hoverReveals++; report(); }
+                    }
+                }
+            }));
+        }
     }
     private static Object field(Object object, String name) { return XposedHelpers.getObjectField(object, name); }
     private static long number(Object object, String name) { return ((Number) field(object, name)).longValue(); }
@@ -348,10 +426,27 @@ public final class NativeCards {
             diagnostics.count("cards_last_aid", lastAid);
             diagnostics.count("cards_rendered", rendered);
             diagnostics.count("cards_errors", errors);
+            diagnostics.count("cards_mode", settings.thumbnailMode);
+            diagnostics.count("cards_blocked_touches", blockedTouches);
+            diagnostics.count("cards_hover_reveals", hoverReveals);
+            long effects = 0, hidden = 0, visibleAid = 0;
+            Rect visible = new Rect();
+            for (Binding binding : bindings) {
+                if (binding.effect.get() != null) effects++;
+                if (binding.hiddenVisibility >= 0) hidden++;
+                View cover = binding.cover.get();
+                if (visibleAid == 0 && binding.active && cover != null
+                        && cover.getWindowVisibility() == View.VISIBLE && cover.getGlobalVisibleRect(visible)
+                        && visible.width() > 100 && visible.height() > 100) visibleAid = binding.aid;
+            }
+            diagnostics.count("cards_effect_count", effects);
+            diagnostics.count("cards_hidden_count", hidden);
+            diagnostics.count("cards_visible_aid", visibleAid);
         } catch (Throwable ignored) { /* Diagnostics must never break host binding. */ }
     }
 
-    private final class Binding implements View.OnLayoutChangeListener, View.OnAttachStateChangeListener {
+    private final class Binding implements View.OnLayoutChangeListener, View.OnAttachStateChangeListener,
+            ViewTreeObserver.OnPreDrawListener {
         final HolderAccess access;
         final WeakReference<Object> holder, model;
         final WeakReference<ViewGroup> root;
@@ -359,6 +454,10 @@ public final class NativeCards {
         final WeakReference<TextView> title;
         final long aid, generation, sequence;
         WeakReference<TextView> label = new WeakReference<TextView>(null);
+        WeakReference<CardCover> effect = new WeakReference<CardCover>(null);
+        int hiddenVisibility = -1;
+        WeakReference<ViewTreeObserver> observer = new WeakReference<ViewTreeObserver>(null);
+        boolean wasShown;
         boolean active = true;
         String category;
         Binding(HolderAccess access, Object holder, Object model, ViewGroup root, View cover,
@@ -376,7 +475,28 @@ public final class NativeCards {
         @Override public void onLayoutChange(View v, int l, int t, int r, int b, int ol, int ot, int or, int ob) {
             position(this);
         }
-        @Override public void onViewAttachedToWindow(View v) { position(this); }
-        @Override public void onViewDetachedFromWindow(View v) { removeLabel(this); }
+        void listen() {
+            ViewGroup view = root.get();
+            if (view == null) return;
+            ViewTreeObserver next = view.getViewTreeObserver();
+            if (observer.get() == next) return;
+            unlisten(); observer = new WeakReference<ViewTreeObserver>(next);
+            if (next.isAlive()) next.addOnPreDrawListener(this);
+        }
+        void unlisten() {
+            ViewTreeObserver old = observer.get();
+            if (old != null && old.isAlive()) old.removeOnPreDrawListener(this);
+            observer.clear(); wasShown = false;
+        }
+        @Override public boolean onPreDraw() {
+            ViewGroup view = root.get();
+            boolean shown = view != null && view.isShown();
+            boolean becameVisible = shown && !wasShown;
+            wasShown = shown;
+            if (becameVisible && active) position(this);
+            return true;
+        }
+        @Override public void onViewAttachedToWindow(View v) { listen(); position(this); }
+        @Override public void onViewDetachedFromWindow(View v) { unlisten(); removeLabel(this); }
     }
 }

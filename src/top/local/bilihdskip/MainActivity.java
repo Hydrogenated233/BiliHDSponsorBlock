@@ -295,7 +295,7 @@ public class MainActivity extends AppCompatActivity {
     void settings(){
         title("按你的方式观看");LinearLayout behavior=card("播放行为");
         switchRow(behavior,"处理静音片段","muteSegments",true);switchRow(behavior,"显示全片标签","fullVideoSegments",true);
-        choiceRow(behavior,"信息流封面全片标签","thumbnailMode",new String[]{"不显示","显示分类标签"},new Object[]{0,1},1);
+        choiceRow(behavior,"信息流封面全片标签","thumbnailMode",new String[]{"无操作","显示标签","隐藏此视频卡片 - 不推荐","模糊此视频卡片 - 鼠标悬浮可查看内容","模糊此视频卡片","遮挡此视频卡片 - 不推荐"},new Object[]{0,1,2,3,4,5},1);
         switchRow(behavior,"拖动到片段内也自动跳过","skipOnSeekToSegment",false);switchRow(behavior,"自动跳过改为加速播放","enableSpeedUp",false);
         switchRow(behavior,"自动跳过音乐视频中的非音乐片段","autoSkipOnMusicVideos",false);
         switchRow(behavior,"有同分类全片标签时改为手动跳过","manualSkipOnFullVideo",false);
