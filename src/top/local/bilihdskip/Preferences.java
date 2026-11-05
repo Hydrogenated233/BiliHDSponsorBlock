@@ -26,7 +26,9 @@ public final class Preferences {
              .put("skipOnSeekToSegment",false).put("skipNoticeDuration",4).put("skipNoticeDurationBefore",3)
              .put("dontShowNotice",false).put("advanceSkipNotice",false).put("showTimeWithSkips",true)
              .put("enableSpeedUp",false).put("speedUpPlaybackRate",2).put("trackViewCount",true)
+             .put("skipResumeAction","continue").put("speedUpResumeAction","continue")
              .put("minDuration",0).put("darkMode",true).put("noticeVisibilityMode",3)
+             .put("hideVideoPlayerControls",false).put("hideInfoButtonPlayerControls",false).put("hideUploadButtonPlayerControls",false)
              .put("manualSkipOnFullVideo",false).put("autoSkipOnMusicVideos",false).put("enableCache",true)
              .put("privacySession",false).put("trackViewCountInPrivate",true).put("trackDownvotes",true).put("trackDownvotesInPrivate",false)
              .put("serverAddress","https://bsbsb.top").put("whitelist",new JSONArray()).put("defaultCategory","chooseACategory");
@@ -35,7 +37,7 @@ public final class Preferences {
     }
     public static JSONObject parse(String value){
         JSONObject j=defaults();
-        try{JSONObject v=new JSONObject(value);java.util.Iterator<String> it=v.keys();while(it.hasNext()){String k=it.next();if(!k.equals("private_id")&&!k.equals("userID"))j.put(k,v.get(k));}}catch(Exception ignored){}
+        try{JSONObject v=new JSONObject(value);java.util.Iterator<String> it=v.keys();while(it.hasNext()){String k=it.next();if(!k.equals("private_id")&&!k.equals("userID")&&!k.equals("privateID"))j.put(k,v.get(k));}}catch(Exception ignored){}
         return j;
     }
     public static int mode(JSONObject config,String category){

@@ -13,6 +13,36 @@ public class SettingsProvider extends ContentProvider {
     public static final Uri URI=Uri.parse("content://"+PACKAGE+".settings");
     static android.content.SharedPreferences prefs(Context c){return c.getSharedPreferences("settings",0);}
     static String previewKey(String key){return "previewed_"+key;}
+    static org.json.JSONObject visibility(android.content.SharedPreferences p,String video,String cid){
+        org.json.JSONObject result=new org.json.JSONObject();
+        try{
+            String key=SegmentVisibility.key(video,cid);result=new org.json.JSONObject(p.getString(key,"{}"));
+            org.json.JSONObject session=MainActivity.SESSION_VISIBILITY.get(key);
+            if(session!=null)for(Iterator<String> keys=session.keys();keys.hasNext();){String uuid=keys.next();int reason=session.optInt(uuid,SegmentVisibility.DEFAULT);if(reason==SegmentVisibility.DEFAULT)result.remove(uuid);else result.put(uuid,reason);}
+        }catch(Exception ignored){}
+        return result;
+    }
+    private static void applyVisibility(android.content.SharedPreferences p,String raw){
+        try{
+            org.json.JSONObject command=new org.json.JSONObject(raw);
+            if(!"visibility".equals(command.optString("action")))return;
+            String video=p.getString("runtime_video",""),cid=p.getString("runtime_cid","");
+            if(!(video+":"+cid).equals(command.optString("key")))throw new IllegalArgumentException("视频已切换，请重新打开");
+            long age=System.currentTimeMillis()-command.optLong("created");if(age<0||age>30000)throw new IllegalArgumentException("播放操作已失效");
+            org.json.JSONObject delta=command.getJSONObject("visibility");String uuid=delta.getString("UUID");Object value=delta.get("hidden");
+            if(!(value instanceof Number)||((Number)value).doubleValue()!=((Number)value).intValue())throw new IllegalArgumentException("Invalid visibility override");
+            int hidden=((Number)value).intValue();String key=SegmentVisibility.key(video,cid);
+            org.json.JSONObject updated=SegmentVisibility.withOverride(visibility(p,video,cid),uuid,hidden);
+            if(SegmentVisibility.canPersist(Preferences.parse(p.getString("config","{}")))){
+                if(!p.edit().putString(key,updated.toString()).commit())throw new IllegalStateException("无法保存片段可见性");
+                MainActivity.SESSION_VISIBILITY.remove(key);
+            }else{
+                org.json.JSONObject previous=MainActivity.SESSION_VISIBILITY.get(key);
+                org.json.JSONObject session=previous==null?new org.json.JSONObject():new org.json.JSONObject(previous.toString());
+                session.put(uuid,hidden);MainActivity.SESSION_VISIBILITY.put(key,session);
+            }
+        }catch(org.json.JSONException e){throw new IllegalArgumentException("Invalid visibility command");}
+    }
     static String defaultCategory(android.content.SharedPreferences p){String category=Preferences.parse(p.getString("config","{}")).optString("defaultCategory","chooseACategory");return Arrays.asList(Preferences.CATEGORIES).contains(category)?category:"chooseACategory";}
     public boolean onCreate(){return true;}
     private void check(boolean writingConfig) {
@@ -29,7 +59,11 @@ public class SettingsProvider extends ContentProvider {
         if("getConfig".equals(method)) {
             b.putBoolean("enabled",p.getBoolean("enabled",true));
             b.putString("categories",p.getString("categories","sponsor"));
-            b.putString("config",Preferences.parse(p.getString("config","{}")).toString());
+            org.json.JSONObject hostConfig=Preferences.parse(p.getString("config","{}"));
+            String video=extras!=null&&extras.containsKey("video")?extras.getString("video",""):p.getString("runtime_video","");
+            String cid=extras!=null&&extras.containsKey("cid")?extras.getString("cid",""):p.getString("runtime_cid","");
+            try{hostConfig.put(SegmentVisibility.CONFIG_KEY,visibility(p,video,cid));}catch(org.json.JSONException impossible){throw new IllegalStateException(impossible);}
+            b.putString("config",hostConfig.toString());
             b.putString("command",p.getString("pending_command",""));
             // Private ID is deliberately never returned to the host. Read-only queries do not need it.
         } else if("getDrafts".equals(method)||"saveDrafts".equals(method)||"setDraftStart".equals(method)||"prepareSubmission".equals(method)||"previewDrafts".equals(method)) {
@@ -64,6 +98,7 @@ public class SettingsProvider extends ContentProvider {
             if(extras==null)throw new IllegalArgumentException("Command required");
             String command=extras.getString("command","");
             if(command.length()>4096)throw new IllegalArgumentException("Command too large");
+            applyVisibility(p,command);
             p.edit().putString("pending_command",command).commit();
         } else if("ack".equals(method)) {
             if(extras!=null&&p.getString("pending_command","").equals(extras.getString("command")))p.edit().remove("pending_command").apply();
@@ -75,7 +110,7 @@ public class SettingsProvider extends ContentProvider {
             if(!config.optBoolean("trackViewCount",true)||config.optBoolean("privacySession",false)&&!config.optBoolean("trackViewCountInPrivate",true))return b;
             String eventKey=extras.getString("key","")+":"+extras.getString("event",uuid);
             if(eventKey.isEmpty()||!seen.add(eventKey))return b;
-            p.edit().putLong("local_skip_count",p.getLong("local_skip_count",0)+1).putLong("local_saved_ms",p.getLong("local_saved_ms",0)+saved).apply();
+            if(extras.getBoolean("count",true))p.edit().putLong("local_skip_count",p.getLong("local_skip_count",0)+1).putLong("local_saved_ms",p.getLong("local_saved_ms",0)+saved).apply();
             final String server=config.optString("serverAddress","https://bsbsb.top");
             if(extras.getBoolean("track",true)&&!uuid.isEmpty())NETWORK.execute(()->{try{ApiClient.request(server,"POST","/api/viewedVideoSponsorTime?UUID="+ApiClient.encode(uuid),null);}catch(Exception ignored){}});
         } else if(configure) {
@@ -86,7 +121,7 @@ public class SettingsProvider extends ContentProvider {
             e.commit(); b.putBoolean("saved",true);
         } else if("report".equals(method) && extras!=null) {
             android.content.SharedPreferences.Editor e=p.edit();
-            for(String key:new String[]{"status","video","cid","segments","position","duration","last_skip","hook_version","segment_json","last_uuid","saved_ms","skip_count","notice","key","native_timeline","native_controls","native_preview"})
+            for(String key:new String[]{"status","video","cid","segments","position","duration","last_skip","hook_version","segment_json","last_uuid","saved_ms","skip_count","notice","key","native_timeline","native_controls","native_preview","native_seek","native_owner"})
                 if(extras.containsKey(key))e.putString("runtime_"+key,extras.getString(key));
             e.putLong("runtime_at",System.currentTimeMillis());e.apply();
         }

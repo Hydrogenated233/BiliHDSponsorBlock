@@ -20,11 +20,8 @@ final class PlayerDock extends LinearLayout {
     private boolean recording;
     private Timeline timeline;
     private boolean expanded;
-    private long noticeUntil;
     private final Activity activity;
-    private TextView transientNotice;
-    private final android.os.Handler handler=new android.os.Handler(android.os.Looper.getMainLooper());
-    private final Runnable hideNotice=()->{if(transientNotice!=null)transientNotice.setVisibility(GONE);};
+    private final NoticeStack notices;
     String diagnostic="unattached";
     String lastShownDiagnostic="";
     private final WeakHashMap<View,int[]> spacing=new WeakHashMap<>();
@@ -32,6 +29,7 @@ final class PlayerDock extends LinearLayout {
     PlayerDock(Activity activity){
         super(activity);
         this.activity=activity;
+        notices=new NoticeStack(activity);
         setOrientation(HORIZONTAL);setGravity(Gravity.CENTER_VERTICAL);setContentDescription("空降助手控制栏");
         info=control(ChromeIcons.INFO,"空降助手");upload=control(ChromeIcons.UPLOAD,"打开投稿菜单");delete=control(ChromeIcons.DELETE,"清除所有标记");cancel=control(ChromeIcons.CANCEL,"取消当前标记");record=control(ChromeIcons.START,"片段现在开始");
         upload.setVisibility(GONE);delete.setVisibility(GONE);cancel.setVisibility(GONE);
@@ -108,17 +106,14 @@ final class PlayerDock extends LinearLayout {
         cancel.setVisibility(marking?VISIBLE:GONE);cancel.setOnClickListener(v->editor.cancelMark());
         upload.setVisibility(showUpload&&(count>0||marking)?VISIBLE:GONE);upload.setOnClickListener(v->editor.open());
         delete.setVisibility(showUpload&&count>0?VISIBLE:GONE);delete.setOnClickListener(v->editor.clear());
-        state.setText(description);skip.setVisibility(active!=null&&Preferences.mode(config,active.category)>0?VISIBLE:GONE);skip.setOnClickListener(v->manual.run());panel.findViewWithTag("undo").setOnClickListener(v->undo.run());markButton.setText(marking?"标记结束":"标记开始");markButton.setOnClickListener(v->{dismissPanel();editor.toggleMark();});draftButton.setOnClickListener(v->{dismissPanel();editor.open();});draftButton.setVisibility(showUpload&&(count>0||marking)?VISIBLE:GONE);
-        timeline.segments=segments;timeline.config=config;timeline.position=position;timeline.duration=duration;timeline.seek=seek;timeline.invalidate();if(System.currentTimeMillis()>noticeUntil)notification.setVisibility(GONE);
+        state.setText(description);skip.setVisibility(active!=null&&new PlaybackPolicy(segments,config).mode(active)>0?VISIBLE:GONE);skip.setOnClickListener(v->manual.run());panel.findViewWithTag("undo").setOnClickListener(v->undo.run());markButton.setText(marking?"标记结束":"标记开始");markButton.setOnClickListener(v->{dismissPanel();editor.toggleMark();});draftButton.setOnClickListener(v->{dismissPanel();editor.open();});draftButton.setVisibility(showUpload&&(count>0||marking)?VISIBLE:GONE);
+        timeline.segments=segments;timeline.config=config;timeline.position=position;timeline.duration=duration;timeline.seek=seek;timeline.invalidate();
     }
-    void notice(String text,Runnable undo,int seconds){showNotice(text+" · 点此撤销",undo,Math.max(1,seconds)*1000L);}
-    void upcoming(String category,long in){if(System.currentTimeMillis()>=noticeUntil)showNotice("即将跳过 "+category,null,750);}
-    private void showNotice(String text,Runnable action,long millis){
-        if(transientNotice==null){transientNotice=label("");GradientDrawable bg=new GradientDrawable();bg.setColor(0xE0232030);bg.setCornerRadius(dp(12));transientNotice.setBackground(bg);FrameLayout.LayoutParams p=new FrameLayout.LayoutParams(-2,-2,Gravity.BOTTOM|Gravity.LEFT);p.leftMargin=dp(24);p.bottomMargin=dp(96);((ViewGroup)activity.findViewById(android.R.id.content)).addView(transientNotice,p);}
-        transientNotice.setText(text);transientNotice.setVisibility(VISIBLE);transientNotice.setOnClickListener(action==null?null:v->{action.run();hideNotice.run();});noticeUntil=System.currentTimeMillis()+millis;handler.removeCallbacks(hideNotice);handler.postDelayed(hideNotice,millis);
-    }
+    void updateNotices(JSONObject config,long position,double rate,boolean paused,List<Logic.Segment> segments){notices.update(config,position,rate,paused,segments);}
+    void notice(List<Logic.Segment> segments,String phase,NoticePolicy.Playback playback,String title,String first,Runnable action,String second,Runnable other,int seconds){notices.show(segments,phase,playback,title,first,action,second,other,seconds);}
+    String noticeDiagnostic(){return notices.diagnostic();}
     private void restoreSpacing(){for(Map.Entry<View,int[]> entry:spacing.entrySet()){View view=entry.getKey();if(view!=null&&view.getLayoutParams() instanceof ViewGroup.MarginLayoutParams){ViewGroup.MarginLayoutParams p=(ViewGroup.MarginLayoutParams)view.getLayoutParams();p.rightMargin=entry.getValue()[0];p.setMarginEnd(entry.getValue()[1]);view.setLayoutParams(p);}}spacing.clear();}
-    void remove(){dismissPanel();restoreSpacing();handler.removeCallbacks(hideNotice);if(transientNotice!=null&&transientNotice.getParent() instanceof ViewGroup)((ViewGroup)transientNotice.getParent()).removeView(transientNotice);if(getParent() instanceof ViewGroup)((ViewGroup)getParent()).removeView(this);}
+    void remove(){dismissPanel();restoreSpacing();notices.remove();if(getParent() instanceof ViewGroup)((ViewGroup)getParent()).removeView(this);}
     final class Timeline extends View {
         List<Logic.Segment> segments=Collections.emptyList();JSONObject config=new JSONObject();long position,duration;Seek seek;Paint paint=new Paint(3);
         Timeline(Context c){super(c);setContentDescription("社区片段时间轴，点按调整进度");}

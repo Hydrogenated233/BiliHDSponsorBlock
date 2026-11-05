@@ -70,9 +70,9 @@ final class NativeTimeline {
                 if(thumb!=null){Rect cut=new Rect(thumb.getBounds());cut.offset(view.getPaddingLeft()-seek.getThumbOffset(),view.getPaddingTop());canvas.clipRect(cut,Region.Op.DIFFERENCE);}
             }
             boolean rtl=view.getLayoutDirection()==View.LAYOUT_DIRECTION_RTL;
+            PlaybackPolicy policy=new PlaybackPolicy(segments,config);
             for(Logic.Segment segment:segments){
-                if(!segment.draft&&(Preferences.mode(config,segment.category)<0||"mute".equals(segment.action)&&!config.optBoolean("muteSegments",true))||"full".equals(segment.action)||segment.start>=duration)continue;
-                if(!segment.draft&&segment.end>segment.start&&(segment.end-segment.start)/1000.0<config.optDouble("minDuration",0))continue;
+                if(!policy.visible(segment)||"full".equals(segment.action)||segment.start>=duration)continue;
                 float start=left+(right-left)*Math.max(0,segment.start)/(float)duration;
                 float end=left+(right-left)*Math.min(duration,segment.end)/(float)duration;
                 if("poi".equals(segment.action))end=Math.min(right,start+2*density);

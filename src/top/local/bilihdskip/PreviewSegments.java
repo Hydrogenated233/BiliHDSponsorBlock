@@ -24,24 +24,19 @@ public final class PreviewSegments {
             return null;
         }
 
-        double minimumDuration = config.optDouble("minDuration", 0);
-        boolean muteEnabled = config.optBoolean("muteSegments", true);
+        PlaybackPolicy policy = new PlaybackPolicy(segments, config);
         double seconds = position / 1000.0;
         double durationSeconds = duration / 1000.0;
         Logic.Segment best = null;
         double shortest = Double.POSITIVE_INFINITY;
 
         for (Logic.Segment segment : segments) {
-            if (segment == null || segment.category == null || !segment.draft && Preferences.mode(config, segment.category) < 0
+            if (segment == null || segment.category == null || !policy.visible(segment)
                     || "full".equals(segment.action)
-                    || (!segment.draft && !muteEnabled && "mute".equals(segment.action))
                     || segment.end < segment.start) {
                 continue;
             }
             double originalLength = (double) segment.end - segment.start;
-            if (!segment.draft && originalLength > 0 && minimumDuration > 0 && originalLength / 1000.0 < minimumDuration) {
-                continue;
-            }
 
             long start = Math.max(0, segment.start);
             long end = Math.min(duration, segment.end);

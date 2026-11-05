@@ -26,6 +26,10 @@ public class MainActivity extends AppCompatActivity {
     SharedPreferences p; JSONObject config; LinearLayout page; FrameLayout frame; int tab=R.id.nav_player;
     Handler main=new Handler(Looper.getMainLooper()); ExecutorService io=Executors.newSingleThreadExecutor();
     TextView live; boolean resumed;
+    static final Map<String,JSONObject> SESSION_VISIBILITY=new ConcurrentHashMap<>();
+    static final Set<String> PENDING_VOTES=new HashSet<>();
+    static final Map<String,Integer> SUCCESSFUL_VOTES=new HashMap<>();
+    String communityDisplayState="";
     static final String[] MODES={"禁用","仅显示","手动跳过","自动跳过"};
     int dp(float n){return (int)(n*getResources().getDisplayMetrics().density+.5f);}
     @Override public void onCreate(Bundle state){
@@ -64,12 +68,21 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout state=card("正在播放");live=text(state,"",com.google.android.material.R.style.TextAppearance_Material3_BodyLarge);updateLive();switchRow(state,"启用空降助手","enabled",true);
         button(state,"打开哔哩哔哩 HD",()->{Intent i=getPackageManager().getLaunchIntentForPackage(SettingsProvider.HOST);if(i!=null)startActivity(i);});
         button(state,"撤销上次跳过",()->command("undo",-1));button(state,"重新查询片段",()->command("refresh",-1));
-        LinearLayout list=card("社区片段");JSONArray entries;try{entries=new JSONArray(runtime("segment_json"));}catch(Exception e){entries=new JSONArray();}
+        final String video=runtime("video"),cid=runtime("cid"),raw=runtime("segment_json");
+        LinearLayout list=card("社区片段");JSONArray entries;try{entries=new JSONArray(raw);}catch(Exception e){entries=new JSONArray();}
+        JSONObject visibilityConfig=visibilityConfig(video,cid);long position=value("position");
+        communityDisplayState=communityState();
         if(entries.length()==0)note(list,"播放视频后，这里会显示当前分 P 的片段、分类和操作。");
         for(int n=0;n<entries.length();n++){
-            JSONObject s=entries.optJSONObject(n);if(s==null)continue;JSONArray range=s.optJSONArray("segment");if(range==null)continue;
+            JSONObject s=entries.optJSONObject(n);if(s==null)continue;Logic.Segment segment=communitySegment(s);if(segment==null)continue;
             MaterialButton item=new MaterialButton(this,null,com.google.android.material.R.attr.materialButtonOutlinedStyle);
-            item.setText(Preferences.label(s.optString("category"))+"  "+Preferences.time((long)(range.optDouble(0)*1000))+" — "+Preferences.time((long)(range.optDouble(1)*1000))+"\n"+s.optString("actionType")+" · "+s.optInt("votes")+" 票");item.setGravity(Gravity.START|Gravity.CENTER_VERTICAL);item.setMinHeight(dp(64));list.addView(item,new LinearLayout.LayoutParams(-1,-2));item.setOnClickListener(v->segmentActions(s));
+            int hidden=SegmentVisibility.hiddenReason(segment,visibilityConfig);
+            String time="full".equals(segment.action)?"全片标签":Preferences.time(segment.start)+("poi".equals(segment.action)?"":" — "+Preferences.time(segment.end));
+            String phase="full".equals(segment.action)?"全片":"poi".equals(segment.action)?(position<segment.start?"精彩时刻 · 未到达":"精彩时刻 · 已到达"):position<segment.start?"未开始":position<segment.end?"当前片段":"已播放";
+            Integer own=SUCCESSFUL_VOTES.get(video+":"+cid+":"+segment.uuid);
+            item.setText(Preferences.label(segment.category)+"  "+time+"\n"+phase+" · "+segment.action+" · "+segment.votes+" 票"+(segment.locked!=0?" · 已锁定":"")+hiddenLabel(hidden)+(PENDING_VOTES.contains(segment.uuid)?" · 正在投票":own==null?"":own==1?" · 已赞成":" · 已反对"));
+            android.graphics.drawable.GradientDrawable dot=new android.graphics.drawable.GradientDrawable();dot.setShape(android.graphics.drawable.GradientDrawable.OVAL);dot.setColor(android.graphics.Color.parseColor(Preferences.color(segment.category)));dot.setSize(dp(12),dp(12));dot.setBounds(0,0,dp(12),dp(12));item.setCompoundDrawablesRelative(dot,null,null,null);item.setCompoundDrawablePadding(dp(12));
+            item.setAlpha(hidden==SegmentVisibility.VISIBLE?1f:.65f);item.setGravity(Gravity.START|Gravity.CENTER_VERTICAL);item.setMinHeight(dp(64));list.addView(item,new LinearLayout.LayoutParams(-1,-2));item.setOnClickListener(v->segmentActions(s,video,cid,raw));
         }
         LinearLayout stats=card("观看统计");note(stats,"已跳过 "+p.getLong("local_skip_count",0)+" 次 · 节省 "+Preferences.time(p.getLong("local_saved_ms",0)));note(stats,"最近跳过："+runtime("last_skip"));
     }
@@ -82,15 +95,91 @@ public class MainActivity extends AppCompatActivity {
         }
         button(col,"恢复 Chrome 分类默认值",()->{put("modes",Preferences.defaults().optJSONObject("modes"));save();render();});
     }
-    void segmentActions(JSONObject s){
-        String[] choices={"跳到片段结束","跳到片段开始","赞成这个标记","反对这个标记","修正分类"};
-        new MaterialAlertDialogBuilder(this).setTitle(Preferences.label(s.optString("category"))).setItems(choices,(d,which)->{JSONArray t=s.optJSONArray("segment");if(which<2)command("seek",(long)(t.optDouble(which==0?1:0)*1000));else if(which==4)new MaterialAlertDialogBuilder(this).setTitle("正确的分类").setItems(Preferences.LABELS,(a,index)->vote(s,Preferences.CATEGORIES[index],0)).show();else vote(s,null,which==2?1:0);}).setNegativeButton("关闭",null).show();
+    static Logic.Segment communitySegment(JSONObject s){
+        if(s==null)return null;JSONArray t=s.optJSONArray("segment");if(t==null||t.length()!=2)return null;
+        double a=t.optDouble(0,Double.NaN),b=t.optDouble(1,Double.NaN);String action=s.optString("actionType");
+        if(!Double.isFinite(a)||!Double.isFinite(b)||a<0||b<a||b>2147483||a==b&&!"poi".equals(action)&&!"full".equals(action)||!Arrays.asList("skip","mute","full","poi").contains(action))return null;
+        return new Logic.Segment(Math.round(a*1000),Math.round(b*1000),s.optString("category"),action,s.optString("UUID"),s.optInt("votes"),s.optInt("locked"));
     }
-    void vote(JSONObject segment,String category,int type){
-        if(!requireId())return;String uuid=segment.optString("UUID");
-        new MaterialAlertDialogBuilder(this).setTitle(category==null?(type==1?"提交赞成票？":"提交反对票？"):"提交分类修正？").setMessage("这会使用你保存的私人 ID 向社区服务器发送此操作。").setNegativeButton("取消",null).setPositiveButton("提交",(d,w)->network(()->ApiClient.vote(server(),p.getString("private_id",""),uuid,type,category))).show();
+    static String hiddenLabel(int hidden){return hidden==SegmentVisibility.DOWNVOTED?" · 隐藏：负票":hidden==SegmentVisibility.MINIMUM_DURATION?" · 隐藏：时长过短":hidden==SegmentVisibility.HIDDEN?" · 隐藏：本地隐藏":"";}
+    JSONObject visibility(String video,String cid){
+        return SettingsProvider.visibility(p,video,cid);
     }
-    void command(String action,long position){try{JSONObject j=new JSONObject().put("id",UUID.randomUUID().toString()).put("key",runtime("video")+":"+runtime("cid")).put("action",action).put("created",System.currentTimeMillis());if(position>=0)j.put("position",position);Bundle b=new Bundle();b.putString("command",j.toString());getContentResolver().call(SettingsProvider.URI,"command",null,b);message("已发送播放操作");}catch(Exception e){message("操作未发送");}}
+    JSONObject visibilityConfig(String video,String cid){JSONObject result=Preferences.parse(p.getString("config","{}"));try{result.put(SegmentVisibility.CONFIG_KEY,visibility(video,cid));}catch(JSONException impossible){throw new IllegalStateException(impossible);}return result;}
+    static final class SegmentSnapshot {
+        final String video,cid,raw,uuid,visibility;
+        SegmentSnapshot(String video,String cid,String raw,String uuid,String visibility){this.video=video;this.cid=cid;this.raw=raw;this.uuid=uuid;this.visibility=visibility;}
+    }
+    boolean current(SegmentSnapshot s){return s!=null&&s.video.equals(runtime("video"))&&s.cid.equals(runtime("cid"))&&s.raw.equals(runtime("segment_json"))&&s.visibility.equals(visibility(s.video,s.cid).toString());}
+    boolean checkCurrent(SegmentSnapshot s){if(current(s))return true;message("视频或片段已更改，请重新打开");return false;}
+    void segmentActions(JSONObject source,String video,String cid,String raw){
+        final Logic.Segment segment=communitySegment(source);if(segment==null)return;
+        final SegmentSnapshot snapshot=new SegmentSnapshot(video,cid,raw,segment.uuid,visibility(video,cid).toString());
+        if(!checkCurrent(snapshot))return;
+        final int hidden=SegmentVisibility.hiddenReason(segment,visibilityConfig(video,cid));
+        ArrayList<String> choices=new ArrayList<>();ArrayList<Runnable> actions=new ArrayList<>();
+        if("poi".equals(segment.action)){if(hidden==SegmentVisibility.VISIBLE||hidden==SegmentVisibility.HIDDEN){choices.add("跳到精彩时刻");actions.add(()->commandFor(snapshot,"seek",segment.start,null,false));}}
+        else if(!"full".equals(segment.action)){choices.add("跳到片段结束");actions.add(()->commandFor(snapshot,"seek",segment.end,null,false));choices.add("跳到片段开始");actions.add(()->commandFor(snapshot,"seek",segment.start,null,false));}
+        if(!segment.uuid.isEmpty()){
+            choices.add("赞成这个标记");actions.add(()->vote(snapshot,null,1));choices.add("反对这个标记");actions.add(()->vote(snapshot,null,0));
+            choices.add("撤回我的投票");actions.add(()->vote(snapshot,null,20));
+            choices.add("修正分类");actions.add(()->new MaterialAlertDialogBuilder(this).setTitle("正确的分类").setItems(Preferences.LABELS,(a,index)->{String category=Preferences.CATEGORIES[index];if(!Arrays.asList(Preferences.actions(category)).contains(segment.action)){message("此分类不支持该片段动作");return;}vote(snapshot,category,0);}).setNegativeButton("取消",null).show());
+            choices.add("复制片段 UUID");actions.add(()->{try{((android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("片段 UUID",snapshot.uuid));message("已复制片段 UUID");}catch(Exception e){message("无法复制片段 UUID");}});
+            if(!"full".equals(segment.action)){
+                choices.add(hidden==SegmentVisibility.VISIBLE?"在本机隐藏":"在本机显示（允许负票 / 过短片段）");actions.add(()->setVisibility(snapshot,hidden==SegmentVisibility.VISIBLE?SegmentVisibility.HIDDEN:SegmentVisibility.VISIBLE,true));
+                if(visibility(video,cid).has(segment.uuid)){choices.add("恢复默认可见性");actions.add(()->setVisibility(snapshot,SegmentVisibility.DEFAULT,true));}
+            }
+        }
+        new MaterialAlertDialogBuilder(this).setTitle(Preferences.label(segment.category)+hiddenLabel(hidden)).setItems(choices.toArray(new String[0]),(d,which)->{if(checkCurrent(snapshot))actions.get(which).run();}).setNegativeButton("关闭",null).show();
+    }
+    boolean setVisibility(SegmentSnapshot snapshot,int hidden,boolean announce){
+        if(!checkCurrent(snapshot))return false;
+        try{
+            String key=SegmentVisibility.key(snapshot.video,snapshot.cid);JSONObject updated=SegmentVisibility.withOverride(visibility(snapshot.video,snapshot.cid),snapshot.uuid,hidden);
+            JSONObject cfg=Preferences.parse(p.getString("config","{}"));boolean persist=SegmentVisibility.canPersist(cfg);
+            if(persist){if(!p.edit().putString(key,updated.toString()).commit()){message("无法保存片段可见性");return false;}SESSION_VISIBILITY.remove(key);}
+            else{JSONObject session=SESSION_VISIBILITY.get(key);if(session==null)session=new JSONObject();session=new JSONObject(session.toString());session.put(snapshot.uuid,hidden);SESSION_VISIBILITY.put(key,session);}
+            JSONObject payload=new JSONObject().put("UUID",snapshot.uuid).put("hidden",hidden);
+            boolean sent=sendCommand(snapshot.video+":"+snapshot.cid,"visibility",-1,payload,!announce);
+            if(announce)message(persist?(sent?"已更新本地可见性":"已保存；播放端同步失败，请重新查询"):(sent?"已更新本次会话可见性":"已更新列表；播放端同步失败"));
+            if(announce)render();return sent;
+        }catch(Exception e){message("无法更新片段可见性");return false;}
+    }
+    void vote(SegmentSnapshot snapshot,String category,int type){
+        if(!checkCurrent(snapshot)||!requireId())return;
+        if(PENDING_VOTES.contains(snapshot.uuid)){message("此片段的投票正在提交");return;}
+        String title=category!=null?"提交分类修正？":type==20?"撤回我的投票？":type==1?"提交赞成票？":"提交反对票？";
+        new MaterialAlertDialogBuilder(this).setTitle(title).setMessage("这会使用你保存的私人 ID 向社区服务器发送此操作。").setNegativeButton("取消",null).setPositiveButton("提交",(d,w)->{
+            if(!checkCurrent(snapshot)||!requireId())return;
+            if(!PENDING_VOTES.add(snapshot.uuid)){message("此片段的投票正在提交");return;}
+            final String address=server(),identity=p.getString("private_id","");message("正在提交…");render();
+            io.execute(()->{ApiClient.Result response=null;try{response=ApiClient.vote(address,identity,snapshot.uuid,type,category);}catch(Exception ignored){}final ApiClient.Result result=response;
+                main.post(()->{PENDING_VOTES.remove(snapshot.uuid);
+                    if(result==null){message("网络请求失败，请稍后重试");render();return;}
+                    if(!result.ok()){message(result.status==429?"请求过于频繁（HTTP 429），投票未确认，请稍后重试":result.status==405?"服务器表示此操作已提交（HTTP 405）":"服务器未接受操作（HTTP "+result.status+"）");render();return;}
+                    if(current(snapshot)){
+                        boolean synced;
+                        if(category==null){String key=snapshot.video+":"+snapshot.cid+":"+snapshot.uuid;if(type==20)SUCCESSFUL_VOTES.remove(key);else SUCCESSFUL_VOTES.put(key,type);
+                            synced=setVisibility(snapshot,type==0?SegmentVisibility.DOWNVOTED:type==1?SegmentVisibility.VISIBLE:SegmentVisibility.DEFAULT,false);}
+                        else synced=sendCommand(snapshot.video+":"+snapshot.cid,"refresh",-1,null,false);
+                        // Refresh only after an accepted write and only in the captured video context.
+                        message((type==20?"已撤回投票":"已提交")+(synced?"":"；播放端同步失败，请重新查询"));
+                    }else message("已提交；视频或片段已更改，请重新打开查看");
+                    render();
+                });
+            });
+        }).show();
+    }
+    boolean sendCommand(String key,String action,long position,JSONObject visibility,boolean refresh){
+        try{JSONObject j=new JSONObject().put("id",UUID.randomUUID().toString()).put("key",key).put("action",action).put("created",System.currentTimeMillis());if(position>=0)j.put("position",position);if(visibility!=null)j.put("visibility",visibility);if(refresh)j.put("refresh",true);Bundle b=new Bundle();b.putString("command",j.toString());getContentResolver().call(SettingsProvider.URI,"command",null,b);return true;}catch(Exception e){return false;}
+    }
+    void commandFor(SegmentSnapshot snapshot,String action,long position,JSONObject payload,boolean refresh){if(checkCurrent(snapshot))message(sendCommand(snapshot.video+":"+snapshot.cid,action,position,payload,refresh)?"已发送播放操作":"操作未发送");}
+    void command(String action,long position){message(sendCommand(runtime("video")+":"+runtime("cid"),action,position,null,false)?"已发送播放操作":"操作未发送");}
+    String communityState(){
+        String video=runtime("video"),cid=runtime("cid"),raw=runtime("segment_json");StringBuilder state=new StringBuilder(video).append(':').append(cid).append(':').append(raw).append(':').append(visibility(video,cid)).append(':').append(p.getString("config","{}"));long position=value("position");
+        try{JSONArray entries=new JSONArray(raw);for(int i=0;i<entries.length();i++){Logic.Segment s=communitySegment(entries.optJSONObject(i));if(s!=null)state.append('|').append(position<s.start?0:position<s.end?1:2);}}catch(JSONException ignored){}
+        return state.toString();
+    }
     static final class DraftSnapshot {
         final String video,raw,revision;final long cid,duration;
         DraftSnapshot(String video,long cid,long duration,String raw,String revision){this.video=video;this.cid=cid;this.duration=duration;this.raw=raw;this.revision=revision;}
@@ -126,23 +215,90 @@ public class MainActivity extends AppCompatActivity {
         catch(android.app.PendingIntent.CanceledException e){message("投稿确认已失效，请重新打开");}
         catch(Exception e){message(e.getMessage()==null?"请先添加有效片段并确认视频信息":e.getMessage());}
     }
-    interface Work{ApiClient.Result run()throws Exception;}
-    void network(Work work){message("正在提交…");io.execute(()->{String result;try{ApiClient.Result r=work.run();result=r.ok()?"已提交":r.status==405?"已经提交过此操作":"服务器未接受操作（HTTP "+r.status+"）";}catch(Exception e){result="网络请求失败，请稍后重试";}final String s=result;main.post(()->{message(s);render();});});}
     String server(){return config.optString("serverAddress","https://bsbsb.top");}
+    void choiceRow(LinearLayout parent,String label,String key,String[] labels,Object[] values,Object fallback){
+        MaterialButton row=new MaterialButton(this,null,com.google.android.material.R.attr.materialButtonTonalStyle);
+        row.setMinHeight(dp(64));row.setGravity(Gravity.START|Gravity.CENTER_VERTICAL);
+        int selected=choiceIndex(config.opt(key),values,choiceIndex(fallback,values,0));
+        row.setText(label+"\n"+labels[selected]);parent.addView(row,new LinearLayout.LayoutParams(-1,-2));
+        row.setOnClickListener(v->new MaterialAlertDialogBuilder(this).setTitle(label)
+                .setSingleChoiceItems(labels,choiceIndex(config.opt(key),values,selected),(d,which)->{
+                    put(key,values[which]);save();row.setText(label+"\n"+labels[which]);d.dismiss();
+                }).setNegativeButton("取消",null).show());
+    }
+    static int choiceIndex(Object value,Object[] values,int fallback){
+        for(int i=0;i<values.length;i++)if(values[i].equals(value)||value instanceof Number&&values[i] instanceof Number
+                &&Double.compare(((Number)value).doubleValue(),((Number)values[i]).doubleValue())==0)return i;
+        return fallback;
+    }
+    TextInputEditText numberField(LinearLayout parent,String label,String key,boolean integer){
+        TextInputEditText input=field(parent,label,config.optString(key,Preferences.defaults().optString(key)),false);
+        input.setInputType(InputType.TYPE_CLASS_NUMBER|(integer?0:InputType.TYPE_NUMBER_FLAG_DECIMAL));return input;
+    }
+    boolean collectNumber(JSONObject patch,TextInputEditText input,String key,boolean integer,String error){
+        input.setError(null);
+        try{
+            String raw=input.getText().toString().trim();Object value;
+            if(integer)value=Integer.valueOf(raw);else value=Double.valueOf(raw);
+            JSONObject validated=SettingsImport.merge(new JSONObject(),new JSONObject().put(key,value));
+            patch.put(key,validated.get(key));return true;
+        }catch(Exception e){input.setError(error);return false;}
+    }
+    void saveSettingsPatch(JSONObject patch){
+        try{config=SettingsImport.merge(config,patch);save();message("已保存");}
+        catch(Exception e){message("设置无效，未保存");}
+    }
+    void confirmResetSettings(){
+        new MaterialAlertDialogBuilder(this).setTitle("恢复默认设置？")
+                .setMessage("将分类、播放、提示、隐私和社区服务器等设置恢复为默认值。\n私人 ID、本地统计、片段草稿及其他应用数据会保留。")
+                .setNegativeButton("取消",null).setPositiveButton("恢复默认设置",(d,w)->{
+                    try{
+                        JSONObject reset=SettingsImport.resetToDefaults(new JSONObject(p.getString("config","{}")));
+                        if(!p.edit().putString("config",reset.toString()).putBoolean("enabled",reset.optBoolean("enabled",true)).commit()){
+                            message("无法保存默认设置");return;
+                        }
+                        config=reset;render();message("已恢复默认设置");
+                    }catch(Exception e){message("无法恢复默认设置");}
+                }).show();
+    }
     void settings(){
-        title("按你的方式观看");LinearLayout behavior=card("播放与提示");switchRow(behavior,"处理静音片段","muteSegments",true);switchRow(behavior,"显示全片标签","fullVideoSegments",true);switchRow(behavior,"拖动到片段内也自动跳过","skipOnSeekToSegment",false);switchRow(behavior,"自动跳过改为加速播放","enableSpeedUp",false);switchRow(behavior,"提前提示即将跳过","advanceSkipNotice",false);switchRow(behavior,"隐藏跳过提示","dontShowNotice",false);switchRow(behavior,"显示跳过后的视频时长","showTimeWithSkips",true);switchRow(behavior,"向社区报告已观看的标记","trackViewCount",true);
-        TextInputEditText speed=field(behavior,"片段内加速倍率",Double.toString(config.optDouble("speedUpPlaybackRate",2)),false),notice=field(behavior,"跳过提示持续秒数",Integer.toString(config.optInt("skipNoticeDuration",4)),false);
-        button(behavior,"保存播放参数",()->{try{double rate=Double.parseDouble(speed.getText().toString());int seconds=Integer.parseInt(notice.getText().toString());if(!Double.isFinite(rate)||rate<1||rate>8||seconds<1||seconds>30)throw new IllegalArgumentException();put("speedUpPlaybackRate",rate);put("skipNoticeDuration",seconds);save();message("已保存");}catch(Exception e){message("倍率应为 1–8，提示应为 1–30 秒");}});
+        title("按你的方式观看");LinearLayout behavior=card("播放行为");
+        switchRow(behavior,"处理静音片段","muteSegments",true);switchRow(behavior,"显示全片标签","fullVideoSegments",true);
+        switchRow(behavior,"拖动到片段内也自动跳过","skipOnSeekToSegment",false);switchRow(behavior,"自动跳过改为加速播放","enableSpeedUp",false);
+        switchRow(behavior,"自动跳过音乐视频中的非音乐片段","autoSkipOnMusicVideos",false);
+        switchRow(behavior,"有同分类全片标签时改为手动跳过","manualSkipOnFullVideo",false);
+        note(behavior,"音乐视频规则适用于已启用分类的跳过片段；同分类全片标签规则会将自动跳过改为手动。");
+        choiceRow(behavior,"暂停时进入片段，恢复播放后","skipResumeAction",new String[]{"按片段设置处理","改为手动跳过"},new Object[]{"continue","manual"},"continue");
+        choiceRow(behavior,"加速过程中暂停，恢复播放后","speedUpResumeAction",new String[]{"继续加速","取消本次加速，改为手动"},new Object[]{"continue","manual"},"continue");
+        TextInputEditText speed=numberField(behavior,"片段内加速倍率（1.1–16）","speedUpPlaybackRate",false),minimum=numberField(behavior,"最短片段时长（秒，0 不限制）","minDuration",false);
+        button(behavior,"保存播放参数",()->{
+            JSONObject patch=new JSONObject();boolean rate=collectNumber(patch,speed,"speedUpPlaybackRate",false,"请输入 1.1–16 之间的倍率"),min=collectNumber(patch,minimum,"minDuration",false,"请输入大于或等于 0 的有限秒数");
+            if(rate&&min)saveSettingsPatch(patch);
+        });
+        LinearLayout notices=card("跳过提示");switchRow(notices,"提前提示即将跳过","advanceSkipNotice",false);switchRow(notices,"隐藏跳过提示","dontShowNotice",false);switchRow(notices,"显示跳过后的视频时长","showTimeWithSkips",true);
+        choiceRow(notices,"提示显示模式","noticeVisibilityMode",new String[]{"0 · 全尺寸提示","1 · 缩小自动跳过提示","2 · 缩小所有提示","3 · 缩小所有提示，半透明自动跳过提示","4 · 缩小并半透明所有提示"},new Object[]{0,1,2,3,4},3);
+        TextInputEditText notice=numberField(notices,"跳过提示持续秒数","skipNoticeDuration",true),advance=numberField(notices,"提前提示秒数","skipNoticeDurationBefore",true);
+        button(notices,"保存提示时长",()->{
+            JSONObject patch=new JSONObject();String error="请输入 1–"+(Integer.MAX_VALUE/1000)+" 之间的整数秒数";
+            boolean after=collectNumber(patch,notice,"skipNoticeDuration",true,error),before=collectNumber(patch,advance,"skipNoticeDurationBefore",true,error);
+            if(after&&before)saveSettingsPatch(patch);
+        });
+        LinearLayout controls=card("播放器按钮");switchRow(controls,"隐藏空降助手的全部播放器按钮","hideVideoPlayerControls",false);switchRow(controls,"隐藏信息按钮","hideInfoButtonPlayerControls",false);switchRow(controls,"隐藏标记与投稿按钮","hideUploadButtonPlayerControls",false);
+        LinearLayout privacy=card("隐私与缓存");switchRow(privacy,"隐私会话","privacySession",false);
+        note(privacy,"隐私会话按下方选项决定是否报告已观看标记、保存片段可见性和反对票记录。");
+        switchRow(privacy,"向社区报告已观看的标记","trackViewCount",true);switchRow(privacy,"隐私会话中也报告已观看标记","trackViewCountInPrivate",true);
+        switchRow(privacy,"在本机保存片段可见性与反对票记录","trackDownvotes",true);switchRow(privacy,"隐私会话中也保存这些记录","trackDownvotesInPrivate",false);
+        switchRow(privacy,"启用片段缓存","enableCache",true);
         LinearLayout account=card("身份与社区服务器");TextInputEditText id=field(account,"私人 ID",p.getString("private_id",""),true),server=field(account,"HTTPS API 服务器",server(),false);note(account,"私人 ID 只保存在本应用私有数据中；查询不发送 ID。投票与投稿由你确认后发送，设置导出排除 ID。");
         button(account,"保存身份与服务器",()->{String address=server.getText().toString().trim();Uri uri=Uri.parse(address);if(!"https".equals(uri.getScheme())||uri.getHost()==null||uri.getQuery()!=null||uri.getEncodedAuthority().contains("@")){server.setError("请输入有效 HTTPS 地址");return;}p.edit().putString("private_id",id.getText().toString().trim()).apply();put("serverAddress",address);save();message("已保存");});
-        LinearLayout data=card("数据与备份");button(data,"导出设置（不含私人 ID）",()->exportDocument(70,"hd-sponsorblock-settings.json"));button(data,"导入设置",()->{Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("application/json").addCategory(Intent.CATEGORY_OPENABLE);startActivityForResult(i,71);});LinearLayout about=card("兼容与状态");note(about,"Xposed 作用域：仅哔哩哔哩 HD\n宿主：2.2.0（2020100）\n"+runtime("hook_version"));note(about,"Chrome 版对齐开发中。完整范围与验证状态以仓库核对表为准。");
+        LinearLayout data=card("数据与备份");button(data,"导出设置（不含私人 ID）",()->exportDocument(70,"hd-sponsorblock-settings.json"));button(data,"导入设置",()->{Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("application/json").addCategory(Intent.CATEGORY_OPENABLE);startActivityForResult(i,71);});button(data,"恢复默认设置",this::confirmResetSettings);LinearLayout about=card("兼容与状态");note(about,"Xposed 作用域：仅哔哩哔哩 HD\n宿主：2.2.0（2020100）\n"+runtime("hook_version"));note(about,"Chrome 版对齐开发中。完整范围与验证状态以仓库核对表为准。");
     }
     void exportDocument(int code,String name){Intent i=new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/json").putExtra(Intent.EXTRA_TITLE,name);startActivityForResult(i,code);}
     @Override public void onActivityResult(int request,int result,Intent data){super.onActivityResult(request,result,data);if(result!=RESULT_OK||data==null||data.getData()==null)return;
-        try{if(request==70||request==72){String body=request==70?config.toString(2):drafts().toString(2);try(java.io.OutputStream out=getContentResolver().openOutputStream(data.getData())){out.write(body.getBytes("UTF-8"));}message("已导出");}else{java.io.ByteArrayOutputStream out=new java.io.ByteArrayOutputStream();try(java.io.InputStream in=getContentResolver().openInputStream(data.getData())){byte[] b=new byte[4096];int n;while((n=in.read(b))!=-1){if(out.size()+n>1048576)throw new java.io.IOException();out.write(b,0,n);}}String content=out.toString("UTF-8");if(request==71){JSONObject parsed=new JSONObject(content);parsed.remove("private_id");parsed.remove("userID");config=Preferences.parse(parsed.toString());save();}else if(request==73){JSONArray a=new JSONArray(content);ApiClient.submission(runtime("video"),value("cid"),"local-validation",value("duration"),a);storeDrafts(a);}render();message("已导入");}}catch(Exception e){message("文件格式无效或无法读取");}
+        try{if(request==70||request==72){String body=request==70?SettingsImport.forExport(config).toString(2):drafts().toString(2);try(java.io.OutputStream out=getContentResolver().openOutputStream(data.getData())){out.write(body.getBytes("UTF-8"));}message("已导出");}else{java.io.ByteArrayOutputStream out=new java.io.ByteArrayOutputStream();try(java.io.InputStream in=getContentResolver().openInputStream(data.getData())){byte[] b=new byte[4096];int n;while((n=in.read(b))!=-1){if(out.size()+n>1048576)throw new java.io.IOException();out.write(b,0,n);}}String content=out.toString("UTF-8");if(request==71){config=SettingsImport.merge(config,new JSONObject(content));save();}else if(request==73){JSONArray a=new JSONArray(content);ApiClient.submission(runtime("video"),value("cid"),"local-validation",value("duration"),a);storeDrafts(a);}render();message("已导入");}}catch(Exception e){message("文件格式无效或无法读取");}
     }
     void message(String s){com.google.android.material.snackbar.Snackbar.make(frame,s,com.google.android.material.snackbar.Snackbar.LENGTH_LONG).show();}
-    final Runnable refresh=new Runnable(){public void run(){if(!resumed)return;updateLive();main.postDelayed(this,1000);}};
+    final Runnable refresh=new Runnable(){public void run(){if(!resumed)return;updateLive();if(tab==R.id.nav_player&&!communityDisplayState.equals(communityState()))render();main.postDelayed(this,1000);}};
     @Override public void onResume(){super.onResume();resumed=true;main.post(refresh);}
     @Override public void onPause(){super.onPause();resumed=false;main.removeCallbacks(refresh);}
 }

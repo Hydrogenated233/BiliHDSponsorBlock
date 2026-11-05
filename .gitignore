@@ -64,6 +64,8 @@
 !/tests-junit/MarkingTest.java
 !/tests-junit/DraftStoreTest.java
 !/tests-junit/PreviewSegmentsTest.java
+!/tests-junit/PlaybackPolicyTest.java
+!/tests-junit/SettingsImportTest.java
 !/tests/
 !/tests/LogicTest.java
 
@@ -72,6 +74,22 @@
 !/docs/native-controls-verification.md
 !/docs/native-marking-verification.md
 !/docs/chrome-parity-current-status.md
+!/docs/playback-policy-verification.md
 
 # tools/xposed-api.jar is fetched and checksum-verified locally; never distributed.
+!/src/top/local/bilihdskip/PlaybackPolicy.java
+!/src/top/local/bilihdskip/PlaybackVisits.java
+!/src/top/local/bilihdskip/PlaybackResume.java
+!/src/top/local/bilihdskip/SeekConfirmation.java
+!/tests-junit/SeekConfirmationTest.java
+!/tests-junit/PlaybackResumeTest.java
+!/tests-junit/PlaybackVisitsTest.java
+!/src/top/local/bilihdskip/SettingsImport.java
+!/src/top/local/bilihdskip/NoticeClock.java
+!/src/top/local/bilihdskip/NoticePolicy.java
+!/src/top/local/bilihdskip/NoticeStack.java
+!/tests-junit/NoticeClockTest.java
+!/tests-junit/NoticePolicyTest.java
+!/src/top/local/bilihdskip/SegmentVisibility.java
+!/tests-junit/SegmentVisibilityTest.java
 # All other docs, runtime data, screenshots, APKs, keys and future files stay denied.

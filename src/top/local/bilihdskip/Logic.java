@@ -30,7 +30,7 @@ public final class Logic {
     /** Hash endpoint includes collisions; exact BV and CID are both mandatory. */
     public static List<Segment> parse(String body, String bvid, long cid) throws JSONException {
         List<Segment> all=parseAll(body,bvid,cid),result=new ArrayList<Segment>();
-        for(Segment s:all)if("skip".equals(s.action))result.add(s);
+        for(Segment s:all)if("skip".equals(s.action)&&(s.votes>=0||s.locked!=0))result.add(s);
         return result;
     }
     public static List<Segment> parseAll(String body, String bvid, long cid) throws JSONException {
@@ -50,7 +50,6 @@ public final class Logic {
                 if(pair==null || pair.length()!=2) continue;
                 double start=pair.optDouble(0,Double.NaN), end=pair.optDouble(1,Double.NaN);
                 if(Double.isNaN(start)||Double.isNaN(end)||Double.isInfinite(start)||Double.isInfinite(end)||start<0||end<start||end>2147483||end==start&&!"poi".equals(action)&&!"full".equals(action)) continue;
-                if(item.optInt("votes",0)<0 && item.optInt("locked",0)==0) continue;
                 result.add(new Segment(Math.round(start*1000),Math.round(end*1000),item.optString("category"),action,item.optString("UUID"),item.optInt("votes",0),item.optInt("locked",0)));
             }
         }
