@@ -10,6 +10,8 @@ import org.json.JSONObject;
 
 /** Native cards share the released presentation/clock rules, independently of player controls. */
 final class NoticeStack {
+    interface OnDismiss { void dismissed(List<Logic.Segment> segments); }
+    private OnDismiss onDismiss;
     private final Activity activity;
     private final LinearLayout stack;
     private final LinkedHashMap<String,Card> cards=new LinkedHashMap<>();
@@ -19,7 +21,7 @@ final class NoticeStack {
     private double rate=1;
     private boolean paused;
     private final class Card {
-        String key,phase,title;Set<String> ids;long start,end;
+        String key,phase,title;Set<String> ids;List<Logic.Segment> segments;long start,end;
         NoticePolicy.Playback playback;
         final NoticeClock clock;
         final LinearLayout view,row;
@@ -32,7 +34,7 @@ final class NoticeStack {
             row=new LinearLayout(activity);row.setGravity(Gravity.CENTER_VERTICAL);view.addView(row);
             text=label("");text.setGravity(Gravity.START|Gravity.CENTER_VERTICAL);row.addView(text,new LinearLayout.LayoutParams(0,-2,1));
             timer=label("");timer.setContentDescription("暂停或继续提示倒计时");row.addView(timer);timer.setOnClickListener(v->{manualPause=!manualPause;clock.setPaused(NoticeClock.Hold.MANUAL,manualPause);});
-            TextView close=label("×");close.setContentDescription("关闭此提示");row.addView(close);close.setOnClickListener(v->remove(this,true));
+            TextView close=label("×");close.setContentDescription("关闭此提示");row.addView(close);close.setOnClickListener(v->{if(onDismiss!=null)onDismiss.dismissed(segments);remove(this,true);});
             LinearLayout actions=new LinearLayout(activity);view.addView(actions);primary=label("");secondary=label("");actions.addView(primary,new LinearLayout.LayoutParams(0,dp(36),1));actions.addView(secondary,new LinearLayout.LayoutParams(0,dp(36),1));
             for(View target:Arrays.asList(view,text,timer,close,primary,secondary)){
                 target.setOnHoverListener((v,e)->{clock.setPaused(NoticeClock.Hold.HOVER,e.getAction()!=MotionEvent.ACTION_HOVER_EXIT);return false;});
@@ -49,6 +51,8 @@ final class NoticeStack {
     private TextView label(String value){TextView text=new TextView(activity);text.setText(value);text.setTextColor(Color.WHITE);text.setTextSize(14);text.setMinHeight(dp(34));text.setPadding(dp(6),dp(2),dp(6),dp(2));text.setGravity(Gravity.CENTER);return text;}
     private static String id(Logic.Segment s){return s.uuid.isEmpty()?s.category+":"+s.action+":"+s.start+":"+s.end:s.uuid;}
     private static Set<String> ids(List<Logic.Segment> segments){Set<String> out=new TreeSet<>();for(Logic.Segment s:segments)out.add(id(s));return out;}
+    void onDismiss(OnDismiss listener){onDismiss=listener;}
+    void hideIntervals(){for(Card card:new ArrayList<>(cards.values()))if(!"complete".equals(card.phase))remove(card,false);}
     void update(JSONObject config,long position,double rate,boolean paused,List<Logic.Segment> segments){
         this.config=config;this.position=position;this.rate=rate;this.paused=paused;
         Set<String> live=new HashSet<>();for(Logic.Segment s:segments)if(s.start<=position&&position<s.end||s.start>position&&s.start-position<=config.optInt("skipNoticeDurationBefore",3)*1000L)live.add(id(s));
@@ -77,7 +81,7 @@ final class NoticeStack {
             cards.put(key,card);LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(-1,-2);params.topMargin=dp(4);stack.addView(card.view,params);
         }
         if(card.playback!=null&&card.playback!=playback)card.clock.reset(Math.max(1,seconds)*1000L);
-        card.title=title;card.playback=playback;Card current=card;
+        card.segments=new ArrayList<>(segments);card.title=title;card.playback=playback;Card current=card;
         action(card.primary,first,firstAction,current);action(card.secondary,second,secondAction,current);
         card.clock.setPaused(NoticeClock.Hold.PAUSED,paused);render(card,card.clock.read());
     }

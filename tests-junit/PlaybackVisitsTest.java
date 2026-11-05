@@ -7,6 +7,29 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class PlaybackVisitsTest {
+    @Test public void dismissUpcomingCarriesIntoVisitAndRearmsAfterLeaving() {
+        update(9000,false,false,a);visits.dismiss(a);
+        assertFalse(visits.available(a));assertFalse(visits.automatic(a));
+        update(10000,false,false,a);assertFalse(visits.available(a));assertFalse(visits.automatic(a));
+        update(20000,false,false,a);update(10000,false,false,a);
+        assertTrue(visits.available(a));assertTrue(visits.automatic(a));
+    }
+    @Test public void closingOneCardDoesNotReviewOverlappingPeer() {
+        update(16000,false,false,a,b);visits.dismiss(a);
+        assertFalse(visits.available(a));assertTrue(visits.available(b));assertTrue(visits.automatic(b));
+        visits.allow(a);assertTrue(visits.available(a));assertTrue(visits.automatic(a));
+    }
+    @Test public void explicitCancelOrUndoReplacesDismissalWithManualAvailability() {
+        update(16000,false,false,a);visits.dismiss(a);visits.deny(a);
+        assertTrue(visits.available(a));assertFalse(visits.automatic(a));
+        visits.dismiss(a);visits.undo(a,false);
+        assertTrue(visits.available(a));assertFalse(visits.automatic(a));
+    }
+    @Test public void dismissingCompletedCardCannotPoisonNextUpcomingVisit() {
+        update(16000,false,false,a);update(20000,false,false,a);visits.dismiss(a);
+        update(21000,false,false,a);update(9000,true,false,a);
+        assertTrue(visits.available(a));assertTrue(visits.automatic(a));
+    }
     private final PlaybackVisits visits = new PlaybackVisits();
     private final Logic.Segment a = segment("A", 10000, 20000, "skip");
     private final Logic.Segment b = segment("B", 15000, 30000, "skip");

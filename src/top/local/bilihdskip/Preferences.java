@@ -28,10 +28,10 @@ public final class Preferences {
              .put("enableSpeedUp",false).put("speedUpPlaybackRate",2).put("trackViewCount",true)
              .put("skipResumeAction","continue").put("speedUpResumeAction","continue")
              .put("minDuration",0).put("darkMode",true).put("noticeVisibilityMode",3)
-             .put("hideVideoPlayerControls",false).put("hideInfoButtonPlayerControls",false).put("hideUploadButtonPlayerControls",false)
+             .put("hideVideoPlayerControls",false).put("hideInfoButtonPlayerControls",false).put("hideUploadButtonPlayerControls",false).put("hideSkipButtonPlayerControls",false)
              .put("manualSkipOnFullVideo",false).put("autoSkipOnMusicVideos",false).put("enableCache",true)
              .put("privacySession",false).put("trackViewCountInPrivate",true).put("trackDownvotes",true).put("trackDownvotesInPrivate",false)
-             .put("serverAddress","https://bsbsb.top").put("whitelist",new JSONArray()).put("defaultCategory","chooseACategory");
+             .put("serverAddress","https://bsbsb.top").put("whitelist",new JSONArray()).put("forceChannelCheck",false).put("defaultCategory","chooseACategory").put("thumbnailMode",1);
         }catch(JSONException e){throw new IllegalStateException(e);}
         return j;
     }

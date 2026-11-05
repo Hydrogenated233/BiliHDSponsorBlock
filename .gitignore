@@ -75,6 +75,7 @@
 !/docs/native-marking-verification.md
 !/docs/chrome-parity-current-status.md
 !/docs/playback-policy-verification.md
+!/docs/navigation-cache-channel-verification.md
 
 # tools/xposed-api.jar is fetched and checksum-verified locally; never distributed.
 !/src/top/local/bilihdskip/PlaybackPolicy.java
@@ -93,3 +94,24 @@
 !/src/top/local/bilihdskip/SegmentVisibility.java
 !/tests-junit/SegmentVisibilityTest.java
 # All other docs, runtime data, screenshots, APKs, keys and future files stay denied.
+!/src/top/local/bilihdskip/DurationAfterSkips.java
+!/src/top/local/bilihdskip/NativeDuration.java
+!/tests-junit/DurationAfterSkipsTest.java
+!/src/top/local/bilihdskip/SegmentCache.java
+!/src/top/local/bilihdskip/CacheBridge.java
+!/tests-junit/SegmentCacheTest.java
+!/src/top/local/bilihdskip/LegacyPoiNavigation.java
+!/tests-junit/LegacyPoiNavigationTest.java
+!/assets/chrome-icons/skipIcon.svg
+!/src/top/local/bilihdskip/ChannelPolicy.java
+!/src/top/local/bilihdskip/ChannelConfig.java
+!/tests-junit/ChannelPolicyTest.java
+!/tests-junit/ChannelConfigTest.java
+!/src/top/local/bilihdskip/NativeCards.java
+!/src/top/local/bilihdskip/FullVideoLabels.java
+!/src/top/local/bilihdskip/LabelBlocks.java
+!/src/top/local/bilihdskip/LabelRequests.java
+!/src/top/local/bilihdskip/VideoLabelCache.java
+!/tests-junit/VideoLabelCacheTest.java
+!/tests-junit/LabelBlocksTest.java
+!/tests-junit/FullVideoLabelsTest.java

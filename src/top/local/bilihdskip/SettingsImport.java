@@ -51,6 +51,7 @@ final class SettingsImport {
      */
     static JSONObject resetToDefaults(JSONObject current) throws JSONException {
         JSONObject copy=new JSONObject(current.toString()),defaults=Preferences.defaults();
+        if(copy.has("whitelistedChannels"))copy.put("whitelistedChannels",new JSONArray());
         for(Iterator<String> keys=defaults.keys();keys.hasNext();) {
             String key=keys.next();
             copy.put(key,defaults.get(key));
@@ -79,6 +80,8 @@ final class SettingsImport {
             number(value,1,Integer.MAX_VALUE/1000,true,key);
         } else if("noticeVisibilityMode".equals(key)) {
             number(value,0,4,true,key); // Release 0.17.1, not later visibility modes.
+        } else if("thumbnailMode".equals(key)) {
+            number(value,0,5,true,key);
         } else if("skipResumeAction".equals(key)||"speedUpResumeAction".equals(key)) {
             require(value instanceof String&&("continue".equals(value)||"manual".equals(value)),key);
         } else if("minDuration".equals(key)) {
@@ -94,7 +97,7 @@ final class SettingsImport {
         } else if("defaultCategory".equals(key)) {
             require(value instanceof String&&("chooseACategory".equals(value)
                     ||Arrays.asList(Preferences.CATEGORIES).contains(value)),key);
-        } else if("whitelist".equals(key)) {
+        } else if("whitelist".equals(key)||"whitelistedChannels".equals(key)) {
             require(value instanceof JSONArray,key);
             JSONArray entries=(JSONArray)value;
             for(int i=0;i<entries.length();i++) {

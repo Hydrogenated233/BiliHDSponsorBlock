@@ -14,7 +14,7 @@ import java.util.Map;
  */
 public final class PlaybackVisits {
     private static final class Visit {
-        boolean inside, entered, auto = true, excluded, overlapOverride;
+        boolean inside, entered, auto = true, excluded, dismissed, overlapOverride;
         long start, end;
 
         Visit(Logic.Segment segment) { start = segment.start; end = segment.end; }
@@ -42,6 +42,7 @@ public final class PlaybackVisits {
                 visit.inside = false;
                 visit.entered = false;
                 visit.excluded = false;
+                visit.dismissed = false;
                 visit.overlapOverride = false;
                 visit.auto = true;
             }
@@ -57,20 +58,26 @@ public final class PlaybackVisits {
             boolean inside = contains(segment.start, segment.end, position);
             if (inside && !visit.inside) {
                 boolean upcomingExclusion = !visit.entered && visit.excluded;
+                boolean upcomingDismissal = !visit.entered && visit.dismissed;
                 visit = new Visit(segment);
                 visit.inside = true;
                 visit.entered = true;
                 visit.auto = !userSeek || skipOnEntry;
                 visit.excluded = upcomingExclusion;
+                visit.dismissed = upcomingDismissal;
                 visits.put(id, visit);
             }
             if (!inside && visit.inside) {
                 visit.excluded = false;
+                visit.dismissed = false;
                 visit.overlapOverride = false;
                 visit.entered = false;
                 visit.auto = true;
             }
-            if (!inside && !visit.entered && position >= segment.end) visit.excluded = false;
+            if (!inside && !visit.entered && position >= segment.end) {
+                visit.excluded = false;
+                visit.dismissed = false;
+            }
             visit.inside = inside;
             visit.start = segment.start;
             visit.end = segment.end;
@@ -101,7 +108,19 @@ public final class PlaybackVisits {
     public void deny(Logic.Segment segment) {
         pruneReviews();
         Visit visit = currentVisit(segment);
-        if (visit != null) visit.excluded = true;
+        if (visit != null) { visit.excluded = true; visit.dismissed = false; }
+    }
+
+    /** Closing a card excludes its source from this visit, including manual/effect cards. */
+    public void dismiss(Logic.Segment segment) {
+        Visit visit = currentVisit(segment);
+        if (visit != null) { visit.excluded = true; visit.dismissed = true; }
+    }
+
+    /** A cancelled visit remains manually available; a dismissed visit does not. */
+    public boolean available(Logic.Segment segment) {
+        Visit visit = currentVisit(segment);
+        return visit != null && !visit.dismissed;
     }
 
     /**
@@ -118,6 +137,7 @@ public final class PlaybackVisits {
         Logic.Segment source = segments.get(id);
         String action = "mute".equals(source.action) && !forceSeek ? "mute" : "skip";
         visit.excluded = true;
+        visit.dismissed = false;
         visit.overlapOverride = false;
         reviews.put(id, action);
         for (Map.Entry<String, Logic.Segment> entry : segments.entrySet()) {
@@ -134,6 +154,7 @@ public final class PlaybackVisits {
         Visit visit = currentVisit(segment);
         if (visit == null) return;
         visit.excluded = false;
+        visit.dismissed = false;
         visit.auto = true;
         visit.overlapOverride = true;
         reviews.remove(key(segment));

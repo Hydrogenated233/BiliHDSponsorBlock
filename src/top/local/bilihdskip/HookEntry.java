@@ -25,7 +25,6 @@ public class HookEntry implements IXposedHookLoadPackage {
     private static Handler MAIN;
     private static final ExecutorService IO=Executors.newSingleThreadExecutor();
     private static final Map<Object,Session> SESSIONS=new WeakHashMap<Object,Session>();
-    private static final Map<String,Cache> CACHE=new LinkedHashMap<String,Cache>();
     private static Context context;
     private static boolean initialized, enabled=true;
     private static long configAt;
@@ -35,6 +34,12 @@ public class HookEntry implements IXposedHookLoadPackage {
     private static PlayerDock dock;
     private static HostEditor editor;
     private static final NativeTimeline nativeTimeline=new NativeTimeline();
+    private static final NativeDuration nativeDuration=new NativeDuration();
+    private static NativeCards nativeCards;
+    private static LabelRequests labelRequests;
+    private static String cardsScope="";
+    private static final Map<String,Long> cardCounts=new ConcurrentHashMap<>();
+    private static final java.util.concurrent.atomic.AtomicBoolean cardReportPending=new java.util.concurrent.atomic.AtomicBoolean();
     private static Session uiSession;
     private static Session playbackSession;
     private static Session reportedSession;
@@ -43,13 +48,12 @@ public class HookEntry implements IXposedHookLoadPackage {
     private static final Set<Method> SEEK_HOOKS=new HashSet<>();
     private static final Set<Method> PLAYBACK_HOOKS=new HashSet<>();
     private static final ThreadLocal<Integer> OWN_SEEK_DEPTH=new ThreadLocal<Integer>(){protected Integer initialValue(){return 0;}};
-    private static final int USER_SEEK=1,PREVIEW_SEEK=2,AUTO_SEEK=3,UNDO_SEEK=4,MANUAL_SEEK=5;
+    private static final int USER_SEEK=1,PREVIEW_SEEK=2,AUTO_SEEK=3,UNDO_SEEK=4,MANUAL_SEEK=5,POI_SEEK=6;
     private static final NativePreview nativePreview=new NativePreview(new NativePreview.Source(){
         public List<Logic.Segment> segments(Object core){Session s=playbackSession;return s!=null&&s.core.get()==core?displaySegments(s):Collections.emptyList();}
         public org.json.JSONObject config(){return config;}
         public void report(String value){HookEntry.report("native_preview",value);}
     });
-    static class Cache {String body;long at;Cache(String b){body=b;at=SystemClock.elapsedRealtime();}}
     static class Identity {
         long aid,cid;String bv,key;
         Identity(long a,long c){aid=a;cid=c;bv=Logic.bvid(a);key=bv+":"+c;}
@@ -70,6 +74,12 @@ public class HookEntry implements IXposedHookLoadPackage {
         final PlaybackVisits visits=new PlaybackVisits();
         final PlaybackResume resume=new PlaybackResume();
         final SeekConfirmation seekConfirmation=new SeekConfirmation();
+        final LegacyPoiNavigation poi=new LegacyPoiNavigation();
+        LegacyPoiNavigation.Event poiEvent=LegacyPoiNavigation.Event.VIDEO_READY;
+        LegacyPoiNavigation.Request poiRequest;
+        boolean poiHidden;
+        long channelAt;String upMid="",upName="";
+        ChannelPolicy.ChannelStatus channelStatus=ChannelPolicy.ChannelStatus.FETCHING;
         Float previousSpeed,appliedSpeed,leftVolume,rightVolume;
         Set<String> viewed=new HashSet<String>();
         Session(Object c,Object p){container=new WeakReference<Object>(c);core=new WeakReference<Object>(p);}
@@ -101,6 +111,12 @@ public class HookEntry implements IXposedHookLoadPackage {
                     if(version!=2020100){report("status","宿主版本不匹配，已停止挂钩");return;}
                     Class<?> container=XposedHelpers.findClass("ex2.j",loader);
                     nativePreview.install(loader);
+                    MAIN.post(()->{
+                        NativeCards.Diagnostics counts=(key,value)->{cardCounts.put(key,value);if(cardReportPending.compareAndSet(false,true))MAIN.postDelayed(()->{cardReportPending.set(false);report("native_cards",cardCounts.toString());},500);};
+                        labelRequests=new LabelRequests(context,counts);
+                        nativeCards=new NativeCards(labelRequests,counts,cardSettings());
+                        nativeCards.install(loader);configAt=0;
+                    });
                     XposedHelpers.findAndHookMethod(container,"getPlayerCoreService",new XC_MethodHook(){
                         @Override protected void afterHookedMethod(final MethodHookParam p){
                             if(p.getResult()==null)return;
@@ -149,9 +165,26 @@ public class HookEntry implements IXposedHookLoadPackage {
             Bundle request=new Bundle();Session owner=playbackSession;
             if(owner!=null&&owner.identity!=null){request.putString("video",owner.identity.bv);request.putString("cid",Long.toString(owner.identity.cid));}
             Bundle b=context.getContentResolver().call(SettingsProvider.URI,"getConfig",null,request);
-            if(b!=null){config=Preferences.parse(b.getString("config","{}"));enabled=config.optBoolean("enabled",true);pendingCommand=b.getString("command","");}
+            if(b!=null){config=Preferences.parse(b.getString("config","{}"));enabled=config.optBoolean("enabled",true);pendingCommand=b.getString("command","");
+                long cacheGeneration=b.getLong("cacheGeneration",0);
+                String scope=config.optString("serverAddress")+":"+enabled+":"+config.optBoolean("fullVideoSegments",true)+":"+config.optInt("thumbnailMode",1)+":"+config.optJSONObject("modes")+":"+config.optBoolean("enableCache",true)+":"+cacheGeneration;
+                if(nativeCards!=null&&!scope.equals(cardsScope)){cardsScope=scope;labelRequests.configure(config,cacheGeneration);nativeCards.refresh(cardSettings());}
+            }
         }catch(Throwable ignored){}
     }
+    private static FullVideoLabels.Settings cardSettings(){Map<String,Integer> modes=new HashMap<>();for(String name:new String[]{"sponsor","selfpromo","exclusive_access"})modes.put(name,Preferences.mode(config,name));return new FullVideoLabels.Settings(enabled,config.optBoolean("fullVideoSegments",true),config.optInt("thumbnailMode",1),modes);}
+    private static String channelContext(Session s){return s.key+":"+Integer.toHexString(System.identityHashCode(s))+":"+s.generation;}
+    private static void updateChannel(Session s,long now){
+        if(s.channelAt!=0&&now-s.channelAt<1000)return;s.channelAt=now;s.upMid="";s.upName="";s.channelStatus=ChannelPolicy.ChannelStatus.FAILED;
+        for(String method:new String[]{"getPlayDirectorServiceV3","getPlayDirectorServiceV2","getVideoPlayDirectorService"})try{
+            Object playable=call(call(s.container.get(),method),"getCurrentPlayableParams"),display=call(playable,"getDisplayParams");
+            if(display==null||((Number)call(display,"getAvid")).longValue()!=s.identity.aid||((Number)call(display,"getCid")).longValue()!=s.identity.cid)continue;
+            String mid=ChannelPolicy.canonicalMid(((Number)call(display,"getMid")).longValue());if(mid==null)continue;
+            s.upMid=mid;try{Object name=call(display,"getAuthor");s.upName=name instanceof String?(String)name:"";}catch(Throwable ignored){}s.channelStatus=ChannelPolicy.ChannelStatus.FOUND;break;
+        }catch(Throwable ignored){}
+        Bundle snapshot=new Bundle();snapshot.putString("up_mid",s.upMid);snapshot.putString("up_name",s.upName);snapshot.putString("channel_context",channelContext(s));snapshot.putString("native_channel",s.channelStatus+" whitelisted="+channel(s).whitelisted);report(snapshot);
+    }
+    private static ChannelPolicy.Decision channel(Session s){return ChannelConfig.evaluate(config,s.upMid,s.channelStatus);}
     private static final Runnable TICK=new Runnable(){public void run(){
         long now=SystemClock.elapsedRealtime();
         try {
@@ -193,12 +226,15 @@ public class HookEntry implements IXposedHookLoadPackage {
                 restore(s,core);
                 s.key=current.key;s.server=server;s.identity=current;s.generation++;s.pending=false;s.retryAt=0;s.failures=0;
                 s.segments=Collections.emptyList();s.lastPosition=-1;s.lastSkip=0;
+                s.poi.clear();s.poiRequest=null;s.poiEvent=LegacyPoiNavigation.Event.VIDEO_READY;s.poiHidden=config.optBoolean("hideSkipButtonPlayerControls",false);
+                s.channelAt=0;s.upMid="";s.upName="";s.channelStatus=ChannelPolicy.ChannelStatus.FETCHING;
                 s.undoPosition=-1;s.undoSource=null;s.seekTarget=-1;s.seekConfirmation.clear();s.seekMembers=Collections.emptyList();s.visits.clear();s.resume.clear();s.viewed.clear();
                 publishSession(s,true);
                 configAt=0;updateConfig(now);
                 load(s);
             }
             if(reportedSession!=s||!reportedKey.equals(s.key))publishSession(s,true);
+            updateChannel(s,now);
             if(!s.pending && s.failures>0 && now>=s.retryAt)load(s);
             long position=((Number)call(core,"getCurrentPosition")).longValue();
             long duration=((Number)call(core,"getDuration")).longValue();
@@ -216,12 +252,14 @@ public class HookEntry implements IXposedHookLoadPackage {
                 if(now-s.seekAt>=100&&s.seekConfirmation.reached(position)){
                     int kind=s.seekKind;long requestedTarget=s.seekTarget;advancing=false;s.seekTarget=-1;s.seekConfirmation.clear();s.seekState="arrived:"+kind;
                     s.visits.update(s.segments,position,kind==USER_SEEK||kind==PREVIEW_SEEK,kind!=PREVIEW_SEEK&&config.optBoolean("skipOnSeekToSegment",false));
-                    if(kind==AUTO_SEEK||kind==MANUAL_SEEK){s.visits.applied(s.seekMembers);completedSeek(s,kind==AUTO_SEEK,requestedTarget);}
+                    if(kind==AUTO_SEEK||kind==MANUAL_SEEK||kind==POI_SEEK){if(kind!=POI_SEEK)s.visits.applied(s.seekMembers);completedSeek(s,kind==AUTO_SEEK||kind==POI_SEEK&&s.poiRequest!=null&&!s.poiRequest.action.forced,requestedTarget);}
                     else if(kind==UNDO_SEEK&&s.undoSource!=null){s.visits.undo(s.undoSource,false);showUndoNotice(s);}
+                    if(s.poiRequest!=null){s.poi.finish(s.poiRequest);s.poiRequest=null;}s.poiEvent=LegacyPoiNavigation.Event.PLAYER_SEEKING;
                     s.seekMembers=Collections.emptyList();
-                }else if(now-s.seekAt>5000){s.seekTarget=-1;s.seekConfirmation.clear();s.seekMembers=Collections.emptyList();s.seekState="unconfirmed";report("status","跳转未确认，未记录本次跳过");s.visits.update(s.segments,position,false,false);}
+                }else if(now-s.seekAt>5000){s.seekTarget=-1;s.seekConfirmation.clear();s.seekMembers=Collections.emptyList();if(s.poiRequest!=null){s.poi.finish(s.poiRequest);s.poiRequest=null;}s.seekState="unconfirmed";report("status","跳转未确认，未记录本次跳过");s.visits.update(s.segments,position,false,false);}
                 else{restore(s,core);showDock(s,position,duration,policy.active(position,"skip",false),now);return;}
             }else s.visits.update(s.segments,position,fallbackSeek,config.optBoolean("skipOnSeekToSegment",false));
+            updatePoi(s,position,duration);if(s.seekTarget>=0){showDock(s,position,duration,policy.active(position,"skip",false),now);return;}
             // A later native rate/volume choice belongs to this visit, not to the extension.
             if(s.previousSpeed!=null&&Math.abs(((Number)call(core,"getPlaySpeed",false)).floatValue()-s.appliedSpeed)>.05){for(Logic.Segment member:s.segments)if(policy.speed(member)&&contains(member,position))s.visits.deny(member);restoreSpeed(s,core);}
             if(s.leftVolume!=null){Object pair=call(core,"getVolume");if(((Number)call(pair,"getFirst")).floatValue()!=0||((Number)call(pair,"getSecond")).floatValue()!=0){for(Logic.Segment member:s.segments)if("mute".equals(member.action)&&contains(member,position))s.visits.deny(member);restoreVolume(s,core);}}
@@ -231,11 +269,11 @@ public class HookEntry implements IXposedHookLoadPackage {
             long target=policy.target(position,duration,config.optBoolean("enableSpeedUp",false),allowed);
             Logic.Segment active=policy.active(position,"skip",false),mute=null;boolean speeding=false;
             for(Logic.Segment member:allowed)if(contains(member,position)){if(policy.automatic(member)&&"mute".equals(member.action)&&mute==null)mute=member;if(policy.speed(member))speeding=true;}
-            boolean suppressed=!enabled;
+            boolean suppressed=!enabled||channel(s).blocks(ChannelPolicy.Consumer.SCHEDULED_INTERVAL_EFFECT);
             if(suppressed){restore(s,core);}
             else {
                 if(mute!=null){if(s.leftVolume==null&&advancing&&running){Object pair=call(core,"getVolume");s.leftVolume=((Number)call(pair,"getFirst")).floatValue();s.rightVolume=((Number)call(pair,"getSecond")).floatValue();call(core,"setVolume",0f,0f);}}
-                else if(s.manualMute==null||!contains(s.manualMute,position)||policy.mode(s.manualMute)<=0)restoreVolume(s,core);
+                else if(s.manualMute==null||!contains(s.manualMute,position)||policy.mode(s.manualMute)<=0||!s.visits.available(s.manualMute))restoreVolume(s,core);
                 if(config.optBoolean("enableSpeedUp",false)&&speeding){if(s.previousSpeed==null&&advancing&&running){s.previousSpeed=((Number)call(core,"getPlaySpeed",false)).floatValue();float rate=(float)Math.max(1.1,Math.min(16,config.optDouble("speedUpPlaybackRate",2)));s.appliedSpeed=Math.min(16,Math.abs(s.previousSpeed-rate)<=.05?s.previousSpeed+rate:Math.max(s.previousSpeed,rate));call(core,"setPlaySpeed",s.appliedSpeed);}}
                 else restoreSpeed(s,core);
             }
@@ -249,35 +287,74 @@ public class HookEntry implements IXposedHookLoadPackage {
             }
         }catch(Throwable e){if(now-s.lastReport>10000){s.lastReport=now;report("status","读取播放器失败: "+e.getClass().getSimpleName());}}
     }
-    private static void load(final Session s) {
+    private static LegacyPoiNavigation.Input poiInput(Session s,long position,long duration){
+        List<LegacyPoiNavigation.Entry> entries=new ArrayList<>();
+        for(Logic.Segment segment:s.segments)if(!segment.draft&&Preferences.mode(config,segment.category)>=0){int hidden=SegmentVisibility.hiddenReason(segment,config);entries.add(new LegacyPoiNavigation.Entry(segment,hidden==SegmentVisibility.VISIBLE?null:hidden,null));}
+        LegacyPoiNavigation.Input input=new LegacyPoiNavigation.Input(s.key,entries,config,position,duration);input.disabled=!enabled;input.hasVideo=isCurrent(s,s.key)&&duration>0;input.paused=s.playbackPaused;input.waiting=s.buffering;return input;
+    }
+    private static void updatePoi(Session s,long position,long duration){
+        LegacyPoiNavigation.Event event=s.poiEvent;s.poiEvent=LegacyPoiNavigation.Event.TIME_UPDATED;
+        boolean hidden=config.optBoolean("hideSkipButtonPlayerControls",false);if(hidden!=s.poiHidden){s.poiHidden=hidden;event=LegacyPoiNavigation.Event.HIDE_BUTTON_CHANGED;}
+        LegacyPoiNavigation.Update update=s.poi.onEvent(event,poiInput(s,position,duration));
+        for(LegacyPoiNavigation.Action action:update.actions)if(action.automatic&&s.seekTarget<0){Object core=s.core.get();if(core!=null)dispatchPoi(s,s.poi.begin(action,poiInput(s,((Number)call(core,"getCurrentPosition")).longValue(),duration)));}
+    }
+    private static void dispatchPoi(Session s,LegacyPoiNavigation.Request request){
+        if(request==null)return;double target=request.target;
+        if(s.seekTarget>=0||Double.isNaN(target)||Double.isInfinite(target)||target<0||target>Integer.MAX_VALUE){s.poi.finish(request);return;}
+        s.poiRequest=request;
+        if(!requestSeek(s,Math.round(target),POI_SEEK,Collections.singletonList(request.action.segment.segment),request.action.segment.segment)){s.poi.finish(request);s.poiRequest=null;}
+    }
+    private static void activatePoi(Session s){
+        Object core=s.core.get();if(core==null||s.seekTarget>=0||!isCurrent(s,s.key))return;
+        LegacyPoiNavigation.Input input=poiInput(s,((Number)call(core,"getCurrentPosition")).longValue(),((Number)call(core,"getDuration")).longValue());dispatchPoi(s,s.poi.begin(s.poi.activate(input),input));
+    }
+    private static void load(final Session s){load(s,false);}
+    private static void load(final Session s,final boolean force) {
         if(s.pending||s.identity==null)return;s.pending=true;
         final Identity id=s.identity;final int generation=s.generation;
-        final String server=s.server;Cache cached=CACHE.get(server+":"+id.bv);
-        if(config.optBoolean("enableCache",true)&&cached!=null&&SystemClock.elapsedRealtime()-cached.at<3600000){finish(s,id,generation,cached.body,null);return;}
+        final String server=s.server;final boolean useCache=config.optBoolean("enableCache",true);
         report("status","正在查询社区片段");
         IO.execute(new Runnable(){public void run(){
-            String body=null,error=null;HttpURLConnection connection=null;
+            String body=null,error=null,cacheState="network";HttpURLConnection connection=null;
             try{
-                byte[] digest=MessageDigest.getInstance("SHA-256").digest(id.bv.getBytes("UTF-8"));
-                String prefix=String.format(java.util.Locale.ROOT,"%02x%02x",digest[0]&255,digest[1]&255);
-                connection=(HttpURLConnection)new URL(server+"/api/skipSegments/"+prefix).openConnection();
+                String prefix=ApiClient.hashPrefix(id.bv);Bundle scope=new Bundle();scope.putString("server",server);scope.putString("prefix",prefix);
+                long cacheGeneration=-1;boolean hit=false;
+                try{
+                    if(force)context.getContentResolver().call(SettingsProvider.URI,"cacheRemove",null,scope);
+                    if(useCache){Bundle cached=context.getContentResolver().call(SettingsProvider.URI,"cacheGet",null,scope);
+                        if(cached!=null&&!cached.getBoolean("failed")){cacheGeneration=cached.getLong("generation",-1);ParcelFileDescriptor descriptor=cached.getParcelable("body");
+                            if(descriptor!=null){try(InputStream in=new ParcelFileDescriptor.AutoCloseInputStream(descriptor)){String raw=CacheBridge.read(in);body=cached.getInt("status")==404?"[]":raw;hit=true;cacheState="persistent-hit status="+cached.getInt("status");}}
+                        }
+                    }
+                }catch(Exception ignored){cacheState="network (cache unavailable)";}
+                if(!hit){
+                connection=(HttpURLConnection)new URL(server.replaceAll("/+$","")+"/api/skipSegments/"+prefix).openConnection();
                 if(!"https".equals(connection.getURL().getProtocol()))throw new IOException("HTTPS required");
                 connection.setInstanceFollowRedirects(false);
                 connection.setConnectTimeout(8000);connection.setReadTimeout(10000);
                 connection.setRequestProperty("User-Agent","BiliHDSponsorBlock/0.1 (HD 2.2.0)");
                 connection.setRequestProperty("Accept","application/json");
                 int code=connection.getResponseCode();
-                if(code==404)body="[]";
-                else if(code!=200)throw new IOException("HTTP "+code);
-                else {
-                    ByteArrayOutputStream out=new ByteArrayOutputStream();InputStream in=connection.getInputStream();
-                    try{byte[] buf=new byte[8192];int n;while((n=in.read(buf))!=-1){if(out.size()+n>2097152)throw new IOException("Response too large");out.write(buf,0,n);}}finally{in.close();}
-                    body=out.toString("UTF-8");
+                if(code!=200&&code!=404)throw new IOException("HTTP "+code);
+                String raw="";InputStream in=code==404?connection.getErrorStream():connection.getInputStream();
+                if(in!=null)try{raw=CacheBridge.read(in);}finally{in.close();}
+                body=code==404?"[]":raw;
+                // Validate before insertion. Cache hits never pass through put or renew their TTL.
+                Logic.parseAll(body,id.bv,id.cid);
+                if(useCache&&cacheGeneration>=0)try{
+                    File temporary=File.createTempFile("bili-hd-response-",".tmp",context.getCacheDir());
+                    try{try(OutputStream out=new FileOutputStream(temporary)){out.write(raw.getBytes("UTF-8"));}
+                        try(ParcelFileDescriptor descriptor=ParcelFileDescriptor.open(temporary,ParcelFileDescriptor.MODE_READ_ONLY)){
+                            Bundle insert=new Bundle(scope);insert.putLong("generation",cacheGeneration);insert.putInt("status",code);insert.putBoolean("ok",code==200);insert.putString("retryAfter",connection.getHeaderField("Retry-After"));insert.putParcelable("body",descriptor);
+                            try{Bundle stored=context.getContentResolver().call(SettingsProvider.URI,"cachePut",null,insert);cacheState="network stored="+(stored!=null&&stored.getBoolean("stored"));}catch(Exception ignored){cacheState="network (cache write failed)";}
+                        }
+                    }finally{if(!temporary.delete())temporary.deleteOnExit();}
+                }catch(Exception ignored){cacheState="network (cache write failed)";}
                 }
             }catch(Throwable e){error=e instanceof IOException?"网络暂不可用":"片段查询失败";}
             finally{if(connection!=null)connection.disconnect();}
-            final String result=body,failure=error;
-            MAIN.post(new Runnable(){public void run(){finish(s,id,generation,result,failure);}});
+            final String result=body,failure=error,cacheDiagnostic=cacheState;
+            MAIN.post(new Runnable(){public void run(){if(generation==s.generation&&isCurrent(s,id.key))report("native_cache",cacheDiagnostic);finish(s,id,generation,result,failure);}});
         }});
     }
     private static void finish(Session s,Identity id,int generation,String body,String error) {
@@ -285,8 +362,7 @@ public class HookEntry implements IXposedHookLoadPackage {
         s.pending=false;
         if(error==null){try{
             List<Logic.Segment> parsed=Logic.parseAll(body,id.bv,id.cid);
-            s.segments=parsed;s.failures=0;
-            if(config.optBoolean("enableCache",true)&&body.length()<=512000)CACHE.put(s.server+":"+id.bv,new Cache(body));while(CACHE.size()>1000)CACHE.remove(CACHE.keySet().iterator().next());
+            s.segments=parsed;s.failures=0;s.poiEvent=LegacyPoiNavigation.Event.SEGMENTS_LOADED;
             if(isCurrent(s,id.key)){publishSession(s,true);report("status",parsed.isEmpty()?"此视频当前分 P 没有可跳过的社区标记":"社区片段已载入");}return;
         }catch(Throwable e){error="片段响应格式异常";}}
         s.failures++;s.retryAt=SystemClock.elapsedRealtime()+Math.min(300000,15000L*(1L<<Math.min(4,s.failures-1)));
@@ -379,14 +455,15 @@ public class HookEntry implements IXposedHookLoadPackage {
         if(config.optBoolean("trackViewCount",true)&&(!config.optBoolean("privacySession",false)||config.optBoolean("trackViewCountInPrivate",true))){
             boolean counted=false;
             for(Logic.Segment member:s.seekMembers){String id=member.uuid.isEmpty()?member.category+":"+member.action+":"+member.start+":"+member.end:member.uuid;if(!s.viewed.add(id))continue;
-                Bundle event=new Bundle();event.putLong("saved",counted?0:Math.max(0,target-from));event.putBoolean("count",!counted);counted=true;
+                long saved=s.seekSource!=null&&"poi".equals(s.seekSource.action)?Math.max(0,s.seekSource.end-s.seekSource.start):Math.max(0,target-from);
+                Bundle event=new Bundle();event.putLong("saved",counted?0:saved);event.putBoolean("count",!counted);counted=true;
                 event.putString("key",s.key);event.putString("event",id);event.putString("uuid",member.uuid);event.putBoolean("track",true);
                 try{context.getContentResolver().call(SettingsProvider.URI,"skipEvent",null,event);}catch(Throwable ignored){}
             }
         }
     }
     private static void undo(Session s){undo(s,s.undoPosition,s.undoTarget,s.undoSource,s.undoMembers);}
-    private static void undo(Session s,long from,long target,Logic.Segment source,List<Logic.Segment> members){if(from<0||source==null)return;if(requestSeek(s,from,UNDO_SEEK,Collections.emptyList(),null)){s.undoPosition=from;s.undoTarget=target;s.undoSource=source;s.undoMembers=new ArrayList<>(members);s.visits.undo(source,false);report("status","正在撤销跳过");}}
+    private static void undo(Session s,long from,long target,Logic.Segment source,List<Logic.Segment> members){if(from<0||source==null)return;boolean poi="poi".equals(source.action);if(poi||requestSeek(s,from,UNDO_SEEK,Collections.emptyList(),null)){s.undoPosition=from;s.undoTarget=target;s.undoSource=source;s.undoMembers=new ArrayList<>(members);s.visits.undo(source,false);if(poi)showUndoNotice(s);else report("status","正在撤销跳过");}}
     private static void showUndoNotice(Session s){if(dock==null||s.undoSource==null)return;final String key=s.key;final Logic.Segment source=s.undoSource;final long target=s.undoTarget;final List<Logic.Segment> members=new ArrayList<>(s.undoMembers);dock.notice(members,"complete",NoticePolicy.Playback.UNDONE,"已撤销 · "+Preferences.label(source.category),"重新跳过",()->{if(isCurrent(s,key))requestSeek(s,target,MANUAL_SEEK,members,source);},null,null,config.optInt("skipNoticeDuration",4));report("status","已撤销，当前片段不再自动跳过");}
     private static void consumeCommand(Session s,Object core,long now,long duration){
         if(pendingCommand.isEmpty())return;
@@ -399,8 +476,15 @@ public class HookEntry implements IXposedHookLoadPackage {
             String action=j.optString("action");
             if("undo".equals(action))undo(s);
             else if("seek".equals(action)){long position=j.optLong("position",-1);if(position>=0&&position<=duration){seek(s,position);}}
-            else if("refresh".equals(action)){CACHE.remove(s.server+":"+s.identity.bv);s.generation++;s.pending=false;load(s);}
-            else if("visibility".equals(action)){configAt=0;updateConfig(now);if(j.optBoolean("refresh")){CACHE.remove(s.server+":"+s.identity.bv);s.generation++;s.pending=false;load(s);}}
+            else if("refresh".equals(action)){s.generation++;s.pending=false;load(s,true);}
+            else if("visibility".equals(action)){configAt=0;updateConfig(now);if(j.optBoolean("refresh")){s.generation++;s.pending=false;load(s,true);}}
+            else if("channel".equals(action)){
+                org.json.JSONObject desired=j.getJSONObject("channel");String token=desired.getString("context");s.channelAt=0;updateChannel(s,now);
+                if(!isCurrent(s,s.key)||!token.equals(channelContext(s))||!s.upMid.equals(desired.getString("mid")))return;
+                Bundle request=new Bundle();request.putString("context",token);request.putString("mid",s.upMid);request.putString("name",s.upName);request.putBoolean("enabled",desired.getBoolean("enabled"));
+                Bundle result=context.getContentResolver().call(SettingsProvider.URI,"setChannelMembership",null,request);
+                if(result!=null&&result.getBoolean("saved")){configAt=0;updateConfig(now);report("status",desired.getBoolean("enabled")?"此 UP 主已加入白名单":"此 UP 主已移出白名单");}
+            }
         }catch(Throwable ignored){}
     }
     private static void showDock(final Session s,long position,long duration,Logic.Segment active,long now){
@@ -413,24 +497,29 @@ public class HookEntry implements IXposedHookLoadPackage {
             public boolean preview(long at,boolean play){if(!requestSeek(s,at,PREVIEW_SEEK,Collections.emptyList(),null))return false;Object core=s.core.get();if(core==null)return false;call(core,play?"resume":"pause");return true;}
             public float speed(){Object core=s.core.get();return core==null?1:((Number)call(core,"getPlaySpeed",false)).floatValue();}
         });}
-        uiSession=s;editor.refresh();nativeTimeline.update(a,displaySegments(s),config,duration,now);
+        uiSession=s;editor.refresh();nativeTimeline.update(a,displaySegments(s),config,duration,now);nativeDuration.update(a,displaySegments(s),config,duration,now);
+        final String noticeKey=s.key;
+        dock.highlight(s.poi.button().enabled,()->{if(isCurrent(s,noticeKey))activatePoi(s);});
+        dock.onNoticeDismiss(members->{if(isCurrent(s,noticeKey)&&members!=null&&!members.isEmpty())s.visits.dismiss(members.get(0));});
         Object core=s.core.get();double rate=core==null?1:((Number)call(core,"getPlaySpeed",false)).doubleValue();
         dock.updateNotices(config,position,rate,s.playbackPaused||s.buffering||s.seekTarget>=0||now-s.lastAdvance>800,s.segments);
+        if(channel(s).blocks(ChannelPolicy.Consumer.SCHEDULED_INTERVAL_NOTICE))dock.hideIntervalNotices();
         try{dock.attach(a,config);}catch(Throwable error){report("native_controls","attach error="+error);android.util.Log.e("HD-SponsorBlock","Native control attachment",error);}
-        if(now-s.lastProbe>1000){s.lastProbe=now;report("native_timeline",nativeTimeline.diagnostic);report("native_controls",dock.diagnostic+" lastVisible="+dock.lastShownDiagnostic);report("notice",dock.noticeDiagnostic());}
+        if(now-s.lastProbe>1000){s.lastProbe=now;report("native_timeline",nativeTimeline.diagnostic);report("native_duration",nativeDuration.diagnostic);report("native_controls",dock.diagnostic+" lastVisible="+dock.lastShownDiagnostic);report("notice",dock.noticeDiagnostic());}
         dock.update(s.segments,config,position,duration,active,
             ()->{if(active!=null) {requestSeek(s,active.end,MANUAL_SEEK,Collections.singletonList(active),active);}},
             ()->undo(s),editor,
             fraction->seek(s,(long)(duration*fraction)));
-        if(enabled&&config.optBoolean("advanceSkipNotice",false)&&!config.optBoolean("dontShowNotice",false)){
+        if(enabled&&!channel(s).blocks(ChannelPolicy.Consumer.SCHEDULED_INTERVAL_NOTICE)&&config.optBoolean("advanceSkipNotice",false)&&!config.optBoolean("dontShowNotice",false)){
             PlaybackPolicy policy=new PlaybackPolicy(s.segments,config);
-            for(Logic.Segment segment:s.segments)if("skip".equals(segment.action)&&policy.automatic(segment)&&segment.start>position&&segment.start-position<config.optInt("skipNoticeDurationBefore",3)*1000L){final String key=s.key;boolean allowed=s.visits.automatic(segment);dock.notice(Collections.singletonList(segment),"upcoming",NoticePolicy.Playback.PENDING,"即将跳过 "+Preferences.label(segment.category),allowed?"本次不跳过":"允许跳过",()->{if(isCurrent(s,key)){if(s.visits.automatic(segment))s.visits.deny(segment);else s.visits.allow(segment);}},null,null,config.optInt("skipNoticeDurationBefore",3));break;}
+            for(Logic.Segment segment:s.segments)if("skip".equals(segment.action)&&policy.automatic(segment)&&s.visits.available(segment)&&segment.start>position&&segment.start-position<config.optInt("skipNoticeDurationBefore",3)*1000L){final String key=s.key;boolean allowed=s.visits.automatic(segment);dock.notice(Collections.singletonList(segment),"upcoming",NoticePolicy.Playback.PENDING,"即将跳过 "+Preferences.label(segment.category),allowed?"本次不跳过":"允许跳过",()->{if(isCurrent(s,key)){if(s.visits.automatic(segment))s.visits.deny(segment);else s.visits.allow(segment);}},null,null,config.optInt("skipNoticeDurationBefore",3));break;}
         }
         if(enabled&&s.seekTarget<0&&now-s.lastSkip>1500)showActiveNotices(s,position,new PlaybackPolicy(s.segments,config));
     }
     private static void showActiveNotices(Session s,long position,PlaybackPolicy policy){
+        if(channel(s).blocks(ChannelPolicy.Consumer.SCHEDULED_INTERVAL_NOTICE))return;
         for(Logic.Segment segment:s.segments){
-            if(!contains(segment,position)||policy.mode(segment)<=0||!("skip".equals(segment.action)||"mute".equals(segment.action)))continue;
+            if(!contains(segment,position)||policy.mode(segment)<=0||!s.visits.available(segment)||!("skip".equals(segment.action)||"mute".equals(segment.action)))continue;
             final String key=s.key;boolean mute="mute".equals(segment.action);
             boolean speed=!mute&&config.optBoolean("enableSpeedUp",false)&&policy.speed(segment);
             boolean manual=policy.mode(segment)==1||!s.visits.automatic(segment)||sameSegment(s.manualMute,segment);
@@ -455,5 +544,5 @@ public class HookEntry implements IXposedHookLoadPackage {
     private static boolean sameSegment(Logic.Segment a,Logic.Segment b){return a!=null&&b!=null&&(!a.uuid.isEmpty()?a.uuid.equals(b.uuid):a.action.equals(b.action)&&a.category.equals(b.category)&&a.start==b.start&&a.end==b.end);}
 
     private static List<Logic.Segment> displaySegments(Session s){if(editor==null||uiSession!=s||editor.segments().isEmpty())return s.segments;ArrayList<Logic.Segment> result=new ArrayList<>(s.segments);result.addAll(editor.segments());return result;}
-    private static void clearUi(){nativeTimeline.clear();nativePreview.clear();if(editor!=null){editor.close();editor=null;}if(dock!=null){dock.remove();dock=null;}uiSession=null;}
+    private static void clearUi(){nativeTimeline.clear();nativeDuration.clear();nativePreview.clear();if(editor!=null){editor.close();editor=null;}if(dock!=null){dock.remove();dock=null;}uiSession=null;}
 }

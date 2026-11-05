@@ -6,7 +6,7 @@ https://github.com/hanydd/BilibiliSponsorBlock
 该项目移植自 ajayyy/SponsorBlock：https://github.com/ajayyy/SponsorBlock
 项目 LICENSE 原样保留该快照的 GNU GPL v3 文本。
 Android 宿主适配为本项目实现；上述来源不代表上游认可或兼容性背书。
-assets/chrome-icons/ 下的六个播放器图标原样取自上述固定快照
+assets/chrome-icons/ 下的七个播放器图标原样取自上述固定快照
 public/icons/ 中的同名 SVG；路径、viewBox 和 even-odd 镂空规则保持不变。
 图标随本项目按 GNU GPL v3 分发，Android 绘制适配见 ChromeIcons.java。
 

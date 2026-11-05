@@ -13,13 +13,13 @@ import java.util.*;
 final class ChromeIcons {
     static final String INFO="PlayerInfoIconSponsorBlocker.svg", START="PlayerStartIconSponsorBlocker.svg",
         STOP="PlayerStopIconSponsorBlocker.svg", UPLOAD="PlayerUploadIconSponsorBlocker.svg",
-        DELETE="PlayerDeleteIconSponsorBlocker.svg", CANCEL="PlayerCancelSegmentIconSponsorBlocker.svg";
+        DELETE="PlayerDeleteIconSponsorBlocker.svg", CANCEL="PlayerCancelSegmentIconSponsorBlocker.svg", HIGHLIGHT="skipIcon.svg";
     private static final Map<String,List<Path>> paths=new HashMap<>();
 
     static Drawable create(Context host,String name){
         List<Path> shape=paths.get(name);
         if(shape==null){
-            if(!Arrays.asList(INFO,START,STOP,UPLOAD,DELETE,CANCEL).contains(name))throw new IllegalArgumentException("Unknown player icon");
+            if(!Arrays.asList(INFO,START,STOP,UPLOAD,DELETE,CANCEL,HIGHLIGHT).contains(name))throw new IllegalArgumentException("Unknown player icon");
             shape=new ArrayList<>();
             try(InputStream input=host.createPackageContext("top.local.bilihdskip",0).getAssets().open("chrome-icons/"+name)){
                 XmlPullParser parser=Xml.newPullParser();parser.setInput(input,"UTF-8");

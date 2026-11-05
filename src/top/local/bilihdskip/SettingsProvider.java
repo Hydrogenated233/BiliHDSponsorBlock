@@ -54,9 +54,15 @@ public class SettingsProvider extends ContentProvider {
         throw new SecurityException("Caller is not allowed");
     }
     @Override public synchronized Bundle call(String method,String arg,Bundle extras) {
-        boolean configure="configure".equals(method)||"command".equals(method);check(configure);
+        boolean configure="configure".equals(method)||"command".equals(method);check(configure||"cacheClear".equals(method));
+        if(method.startsWith("cache")){try{return CacheBridge.call(getContext(),method,extras);}catch(java.io.IOException e){Bundle failed=new Bundle();failed.putBoolean("failed",true);return failed;}}
         android.content.SharedPreferences p=prefs(getContext());Bundle b=new Bundle();
-        if("getConfig".equals(method)) {
+        if("setChannelMembership".equals(method)){
+            if(extras==null||!(extras.get("enabled") instanceof Boolean))throw new IllegalArgumentException("Invalid channel update");
+            String mid=extras.getString("mid","");if(ChannelPolicy.canonicalMid(mid)==null||!mid.equals(p.getString("runtime_up_mid",""))||!extras.getString("context","").equals(p.getString("runtime_channel_context","")))throw new IllegalStateException("视频已切换，请重新打开");
+            try{org.json.JSONObject updated=ChannelConfig.withMembership(Preferences.parse(p.getString("config","{}")),mid,extras.getString("name",""),extras.getBoolean("enabled"));if(!p.edit().putString("config",updated.toString()).commit())throw new IllegalStateException("无法保存白名单");b.putBoolean("saved",true);}catch(org.json.JSONException e){throw new IllegalArgumentException("Invalid channel update");}
+        } else if("getConfig".equals(method)) {
+            b.putLong("cacheGeneration",p.getLong("cache_generation",0));
             b.putBoolean("enabled",p.getBoolean("enabled",true));
             b.putString("categories",p.getString("categories","sponsor"));
             org.json.JSONObject hostConfig=Preferences.parse(p.getString("config","{}"));
@@ -114,14 +120,16 @@ public class SettingsProvider extends ContentProvider {
             final String server=config.optString("serverAddress","https://bsbsb.top");
             if(extras.getBoolean("track",true)&&!uuid.isEmpty())NETWORK.execute(()->{try{ApiClient.request(server,"POST","/api/viewedVideoSponsorTime?UUID="+ApiClient.encode(uuid),null);}catch(Exception ignored){}});
         } else if(configure) {
+            boolean cacheWasEnabled=Preferences.parse(p.getString("config","{}")).optBoolean("enableCache",true);
             android.content.SharedPreferences.Editor e=p.edit();
             if(extras!=null && extras.containsKey("private_id"))e.putString("private_id",extras.getString("private_id").trim());
             if(extras!=null&&extras.containsKey("config"))e.putString("config",Preferences.parse(extras.getString("config")).toString());
             if(extras!=null&&extras.containsKey("trackViewCount")){org.json.JSONObject cfg=Preferences.parse(p.getString("config","{}"));try{cfg.put("trackViewCount",extras.getBoolean("trackViewCount"));}catch(org.json.JSONException impossible){throw new IllegalStateException(impossible);}e.putString("config",cfg.toString());}
             e.commit(); b.putBoolean("saved",true);
+            if(cacheWasEnabled&&!Preferences.parse(p.getString("config","{}")).optBoolean("enableCache",true))NETWORK.execute(()->{try{CacheBridge.call(getContext(),"cacheClear",null);}catch(java.io.IOException ignored){}});
         } else if("report".equals(method) && extras!=null) {
             android.content.SharedPreferences.Editor e=p.edit();
-            for(String key:new String[]{"status","video","cid","segments","position","duration","last_skip","hook_version","segment_json","last_uuid","saved_ms","skip_count","notice","key","native_timeline","native_controls","native_preview","native_seek","native_owner"})
+            for(String key:new String[]{"status","video","cid","segments","position","duration","last_skip","hook_version","segment_json","last_uuid","saved_ms","skip_count","notice","key","native_timeline","native_controls","native_preview","native_seek","native_owner","native_duration","native_cache","native_channel","up_mid","up_name","channel_context","native_cards"})
                 if(extras.containsKey(key))e.putString("runtime_"+key,extras.getString(key));
             e.putLong("runtime_at",System.currentTimeMillis());e.apply();
         }

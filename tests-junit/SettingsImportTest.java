@@ -193,6 +193,13 @@ public class SettingsImportTest {
         assertTrue(sameJson(defaults,SettingsImport.resetToDefaults(new JSONObject())));
     }
 
+    @Test public void canonicalChannelResetAndImportAreValidated() throws Exception {
+        JSONObject current=new JSONObject().put("whitelistedChannels",new JSONArray().put("42"));
+        assertEquals(0,SettingsImport.resetToDefaults(current).getJSONArray("whitelistedChannels").length());
+        assertEquals(1,current.getJSONArray("whitelistedChannels").length());
+        assertEquals("43",SettingsImport.merge(current,new JSONObject().put("whitelistedChannels",new JSONArray().put("43"))).getJSONArray("whitelistedChannels").getString(0));
+        try{SettingsImport.merge(current,new JSONObject().put("whitelistedChannels",true));fail("Malformed whitelist accepted");}catch(IllegalArgumentException expected){}
+    }
     @Test public void identityKeysAreNeverImportedAndExistingIdentityIsUntouched() throws Exception {
         JSONObject current=current(),imported=new JSONObject().put("skipNoticeDuration",9);
         String[] keys={"userID","private_id","privateID"};

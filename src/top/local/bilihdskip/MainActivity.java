@@ -54,8 +54,26 @@ public class MainActivity extends AppCompatActivity {
     TextInputEditText field(LinearLayout parent,String label,String value,boolean password){TextInputLayout box=new TextInputLayout(this,null,com.google.android.material.R.attr.textInputOutlinedStyle);box.setHint(label);TextInputEditText e=new TextInputEditText(box.getContext());e.setSingleLine(true);if(password){e.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_PASSWORD);box.setEndIconMode(TextInputLayout.END_ICON_PASSWORD_TOGGLE);}e.setText(value);box.addView(e);LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,-2);lp.setMargins(0,dp(8),0,dp(8));parent.addView(box,lp);return e;}
     void switchRow(LinearLayout parent,String label,String key,boolean fallback){SwitchMaterial s=new SwitchMaterial(this);s.setText(label);s.setTextSize(16);s.setMinHeight(dp(56));s.setChecked(config.optBoolean(key,fallback));parent.addView(s,new LinearLayout.LayoutParams(-1,-2));s.setOnCheckedChangeListener((b,checked)->{put(key,checked);save();});}
     void put(String key,Object value){try{config.put(key,value);}catch(JSONException e){throw new IllegalStateException(e);}}
-    void save(){p.edit().putString("config",config.toString()).putBoolean("enabled",config.optBoolean("enabled",true)).apply();}
+    void save(){boolean clear=Preferences.parse(p.getString("config","{}")).optBoolean("enableCache",true)&&!config.optBoolean("enableCache",true);p.edit().putString("config",config.toString()).putBoolean("enabled",config.optBoolean("enabled",true)).apply();if(clear)clearCache(false);}
+    void clearCache(boolean notify){io.execute(()->{try{Bundle result=getContentResolver().call(SettingsProvider.URI,"cacheClear",null,null);if(result==null||!result.getBoolean("cleared"))throw new java.io.IOException();if(notify)main.post(()->message("片段和标签缓存已清除"));}catch(Exception e){main.post(()->message("无法清除缓存，请重试"));}});}
+    void channelSettings(){
+        LinearLayout channels=card("UP 主白名单");
+        note(channels,"白名单中的 UP 主不自动处理区间片段；社区标记、手动跳转和投稿仍可使用。名称仅供辨认，匹配使用数字 UID。");
+        switchRow(channels,"取得 UP 主信息前等待自动处理","forceChannelCheck",false);
+        for(Object entry:ChannelConfig.entries(config)){
+            String mid=ChannelPolicy.entryMid(entry);if(mid==null)continue;String name=ChannelPolicy.presentationName(entry);
+            button(channels,(name.isEmpty()?"UID "+mid:name+" · UID "+mid)+" · 移除",()->{
+                try{config=ChannelConfig.withMembership(Preferences.parse(p.getString("config","{}")),mid,"",false);save();render();}catch(Exception e){message("无法更新 UP 主白名单");}
+            });
+        }
+        TextInputEditText uid=field(channels,"添加 UP 主的数字 UID","",false);uid.setInputType(InputType.TYPE_CLASS_NUMBER);
+        button(channels,"加入白名单",()->{
+            String mid=uid.getText().toString().trim();if(ChannelPolicy.canonicalMid(mid)==null){uid.setError("请输入有效的正整数 UID");return;}
+            try{config=ChannelConfig.withMembership(Preferences.parse(p.getString("config","{}")),mid,"",true);save();render();}catch(Exception e){message("无法更新 UP 主白名单");}
+        });
+    }
     void render(){
+        config=Preferences.parse(p.getString("config","{}"));
         frame.removeAllViews();live=null;ScrollView scroll=new ScrollView(this);scroll.setFillViewport(true);frame.addView(scroll);
         LinearLayout outer=new LinearLayout(this);outer.setGravity(Gravity.TOP|Gravity.CENTER_HORIZONTAL);scroll.addView(outer,new ScrollView.LayoutParams(-1,-2));
         page=new LinearLayout(this);page.setOrientation(LinearLayout.VERTICAL);page.setPadding(dp(28),dp(20),dp(28),dp(32));outer.addView(page,new LinearLayout.LayoutParams(Math.min(getResources().getDisplayMetrics().widthPixels-dp(96),dp(980)),-2));
@@ -68,6 +86,18 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout state=card("正在播放");live=text(state,"",com.google.android.material.R.style.TextAppearance_Material3_BodyLarge);updateLive();switchRow(state,"启用空降助手","enabled",true);
         button(state,"打开哔哩哔哩 HD",()->{Intent i=getPackageManager().getLaunchIntentForPackage(SettingsProvider.HOST);if(i!=null)startActivity(i);});
         button(state,"撤销上次跳过",()->command("undo",-1));button(state,"重新查询片段",()->command("refresh",-1));
+        final String mid=runtime("up_mid"),channelToken=runtime("channel_context"),channelName=runtime("up_name");
+        if(ChannelPolicy.canonicalMid(mid)!=null){
+            note(state,(channelName.isEmpty()?"当前 UP 主":channelName)+" · UID "+mid);
+            final boolean member=ChannelConfig.contains(config,mid);
+            button(state,member?"将此 UP 主移出白名单":"将此 UP 主加入白名单",()->{
+                if(!mid.equals(runtime("up_mid"))||!channelToken.equals(runtime("channel_context"))){message("视频已切换，请重新打开");return;}
+                try{JSONObject update=new JSONObject().put("context",channelToken).put("mid",mid).put("enabled",!member);
+                    JSONObject command=new JSONObject().put("id",UUID.randomUUID().toString()).put("created",System.currentTimeMillis()).put("action","channel").put("key",runtime("video")+":"+runtime("cid")).put("channel",update);
+                    Bundle request=new Bundle();request.putString("command",command.toString());getContentResolver().call(SettingsProvider.URI,"command",null,request);message("正在更新 UP 主白名单");
+                }catch(Exception e){message("无法更新 UP 主白名单");}
+            });
+        }else note(state,"当前视频暂未提供可验证的 UP 主 UID。");
         final String video=runtime("video"),cid=runtime("cid"),raw=runtime("segment_json");
         LinearLayout list=card("社区片段");JSONArray entries;try{entries=new JSONArray(raw);}catch(Exception e){entries=new JSONArray();}
         JSONObject visibilityConfig=visibilityConfig(video,cid);long position=value("position");
@@ -177,6 +207,7 @@ public class MainActivity extends AppCompatActivity {
     void command(String action,long position){message(sendCommand(runtime("video")+":"+runtime("cid"),action,position,null,false)?"已发送播放操作":"操作未发送");}
     String communityState(){
         String video=runtime("video"),cid=runtime("cid"),raw=runtime("segment_json");StringBuilder state=new StringBuilder(video).append(':').append(cid).append(':').append(raw).append(':').append(visibility(video,cid)).append(':').append(p.getString("config","{}"));long position=value("position");
+        state.append('|').append(runtime("channel_context")).append('|').append(runtime("up_mid")).append('|').append(runtime("up_name"));
         try{JSONArray entries=new JSONArray(raw);for(int i=0;i<entries.length();i++){Logic.Segment s=communitySegment(entries.optJSONObject(i));if(s!=null)state.append('|').append(position<s.start?0:position<s.end?1:2);}}catch(JSONException ignored){}
         return state.toString();
     }
@@ -264,6 +295,7 @@ public class MainActivity extends AppCompatActivity {
     void settings(){
         title("按你的方式观看");LinearLayout behavior=card("播放行为");
         switchRow(behavior,"处理静音片段","muteSegments",true);switchRow(behavior,"显示全片标签","fullVideoSegments",true);
+        choiceRow(behavior,"信息流封面全片标签","thumbnailMode",new String[]{"不显示","显示分类标签"},new Object[]{0,1},1);
         switchRow(behavior,"拖动到片段内也自动跳过","skipOnSeekToSegment",false);switchRow(behavior,"自动跳过改为加速播放","enableSpeedUp",false);
         switchRow(behavior,"自动跳过音乐视频中的非音乐片段","autoSkipOnMusicVideos",false);
         switchRow(behavior,"有同分类全片标签时改为手动跳过","manualSkipOnFullVideo",false);
@@ -283,12 +315,14 @@ public class MainActivity extends AppCompatActivity {
             boolean after=collectNumber(patch,notice,"skipNoticeDuration",true,error),before=collectNumber(patch,advance,"skipNoticeDurationBefore",true,error);
             if(after&&before)saveSettingsPatch(patch);
         });
-        LinearLayout controls=card("播放器按钮");switchRow(controls,"隐藏空降助手的全部播放器按钮","hideVideoPlayerControls",false);switchRow(controls,"隐藏信息按钮","hideInfoButtonPlayerControls",false);switchRow(controls,"隐藏标记与投稿按钮","hideUploadButtonPlayerControls",false);
+        LinearLayout controls=card("播放器按钮");switchRow(controls,"隐藏空降助手的全部播放器按钮","hideVideoPlayerControls",false);switchRow(controls,"隐藏信息按钮","hideInfoButtonPlayerControls",false);switchRow(controls,"隐藏标记与投稿按钮","hideUploadButtonPlayerControls",false);switchRow(controls,"隐藏高能点跳转按钮","hideSkipButtonPlayerControls",false);
         LinearLayout privacy=card("隐私与缓存");switchRow(privacy,"隐私会话","privacySession",false);
         note(privacy,"隐私会话按下方选项决定是否报告已观看标记、保存片段可见性和反对票记录。");
         switchRow(privacy,"向社区报告已观看的标记","trackViewCount",true);switchRow(privacy,"隐私会话中也报告已观看标记","trackViewCountInPrivate",true);
         switchRow(privacy,"在本机保存片段可见性与反对票记录","trackDownvotes",true);switchRow(privacy,"隐私会话中也保存这些记录","trackDownvotesInPrivate",false);
-        switchRow(privacy,"启用片段缓存","enableCache",true);
+        switchRow(privacy,"启用片段和标签缓存","enableCache",true);
+        button(privacy,"清除片段和标签缓存",()->clearCache(true));
+        channelSettings();
         LinearLayout account=card("身份与社区服务器");TextInputEditText id=field(account,"私人 ID",p.getString("private_id",""),true),server=field(account,"HTTPS API 服务器",server(),false);note(account,"私人 ID 只保存在本应用私有数据中；查询不发送 ID。投票与投稿由你确认后发送，设置导出排除 ID。");
         button(account,"保存身份与服务器",()->{String address=server.getText().toString().trim();Uri uri=Uri.parse(address);if(!"https".equals(uri.getScheme())||uri.getHost()==null||uri.getQuery()!=null||uri.getEncodedAuthority().contains("@")){server.setError("请输入有效 HTTPS 地址");return;}p.edit().putString("private_id",id.getText().toString().trim()).apply();put("serverAddress",address);save();message("已保存");});
         LinearLayout data=card("数据与备份");button(data,"导出设置（不含私人 ID）",()->exportDocument(70,"hd-sponsorblock-settings.json"));button(data,"导入设置",()->{Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("application/json").addCategory(Intent.CATEGORY_OPENABLE);startActivityForResult(i,71);});button(data,"恢复默认设置",this::confirmResetSettings);LinearLayout about=card("兼容与状态");note(about,"Xposed 作用域：仅哔哩哔哩 HD\n宿主：2.2.0（2020100）\n"+runtime("hook_version"));note(about,"Chrome 版对齐开发中。完整范围与验证状态以仓库核对表为准。");

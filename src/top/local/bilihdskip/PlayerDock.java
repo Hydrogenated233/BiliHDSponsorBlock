@@ -16,7 +16,7 @@ final class PlayerDock extends LinearLayout {
     private LinearLayout panel;
     private PopupWindow popup;
     private TextView state,skip,notification,markButton,draftButton;
-    private final ImageView info,record,cancel,upload,delete;
+    private final ImageView info,record,cancel,upload,delete,highlight;
     private boolean recording;
     private Timeline timeline;
     private boolean expanded;
@@ -31,7 +31,8 @@ final class PlayerDock extends LinearLayout {
         this.activity=activity;
         notices=new NoticeStack(activity);
         setOrientation(HORIZONTAL);setGravity(Gravity.CENTER_VERTICAL);setContentDescription("空降助手控制栏");
-        info=control(ChromeIcons.INFO,"空降助手");upload=control(ChromeIcons.UPLOAD,"打开投稿菜单");delete=control(ChromeIcons.DELETE,"清除所有标记");cancel=control(ChromeIcons.CANCEL,"取消当前标记");record=control(ChromeIcons.START,"片段现在开始");
+        info=control(ChromeIcons.INFO,"空降助手");highlight=control(ChromeIcons.HIGHLIGHT,"跳到高能点");upload=control(ChromeIcons.UPLOAD,"打开投稿菜单");delete=control(ChromeIcons.DELETE,"清除所有标记");cancel=control(ChromeIcons.CANCEL,"取消当前标记");record=control(ChromeIcons.START,"片段现在开始");
+        highlight.setVisibility(GONE);
         upload.setVisibility(GONE);delete.setVisibility(GONE);cancel.setVisibility(GONE);
         info.setOnClickListener(v->{expanded=!expanded;if(expanded)showPanel();else dismissPanel();});
     }
@@ -97,6 +98,7 @@ final class PlayerDock extends LinearLayout {
     }
     TextView label(String value){TextView t=new TextView(getContext());t.setText(value);t.setTextColor(Color.WHITE);t.setTextSize(14);t.setGravity(Gravity.CENTER);t.setPadding(dp(8),dp(3),dp(8),dp(3));t.setMinHeight(dp(34));return t;}
     interface Seek {void to(double fraction);}
+    void highlight(boolean shown,Runnable action){highlight.setVisibility(shown?VISIBLE:GONE);highlight.setOnClickListener(shown?v->action.run():null);}
     void update(List<Logic.Segment> segments,JSONObject config,long position,long duration,Logic.Segment active,Runnable manual,Runnable undo,HostEditor editor,Seek seek){
         if(panel==null)ensurePanel();
         String description=active==null?Preferences.time(position)+" / "+Preferences.time(duration):Preferences.label(active.category)+" · "+Preferences.time(active.end-position);
@@ -110,6 +112,8 @@ final class PlayerDock extends LinearLayout {
         timeline.segments=segments;timeline.config=config;timeline.position=position;timeline.duration=duration;timeline.seek=seek;timeline.invalidate();
     }
     void updateNotices(JSONObject config,long position,double rate,boolean paused,List<Logic.Segment> segments){notices.update(config,position,rate,paused,segments);}
+    void onNoticeDismiss(NoticeStack.OnDismiss listener){notices.onDismiss(listener);}
+    void hideIntervalNotices(){notices.hideIntervals();}
     void notice(List<Logic.Segment> segments,String phase,NoticePolicy.Playback playback,String title,String first,Runnable action,String second,Runnable other,int seconds){notices.show(segments,phase,playback,title,first,action,second,other,seconds);}
     String noticeDiagnostic(){return notices.diagnostic();}
     private void restoreSpacing(){for(Map.Entry<View,int[]> entry:spacing.entrySet()){View view=entry.getKey();if(view!=null&&view.getLayoutParams() instanceof ViewGroup.MarginLayoutParams){ViewGroup.MarginLayoutParams p=(ViewGroup.MarginLayoutParams)view.getLayoutParams();p.rightMargin=entry.getValue()[0];p.setMarginEnd(entry.getValue()[1]);view.setLayoutParams(p);}}spacing.clear();}
